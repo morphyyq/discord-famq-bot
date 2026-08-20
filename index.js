@@ -530,10 +530,10 @@ const LOG_THREAD_DEFS = {
         description: "Логи принудительного исключения участников с сервера."
     },
     channelDelete: {
-        name: "🗑️ Удаление каналов",
-        title: "🗑️ Канал удалён",
-        color: 0xE74C3C,
-        description: "Логи удаления каналов и категорий."
+        name: "📡 Каналы",
+        title: "📡 Изменение каналов",
+        color: 0x3498DB,
+        description: "Логи создания, удаления, переименования каналов и изменения прав."
     }
 };
 
@@ -626,6 +626,10 @@ async function ensureLogThread(guild, key) {
             if (!thread) {
                 const archived = await forum.threads.fetchArchived({ limit: 100 }).catch(() => null);
                 thread = archived?.threads?.find(t => t.name === def.name) || null;
+            }
+
+            if (thread && thread.name !== def.name) {
+                await thread.setName(def.name).catch(() => null);
             }
 
             if (!thread) {
@@ -1443,25 +1447,128 @@ client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
 
 
 // =====================================================
-// CHANNEL DELETE — логирование удаления каналов и категорий
+// CHANNEL LOGS — создание, удаление, переименование и права каналов
 // =====================================================
+function channelTypeName(channel) {
+    if (channel.type === ChannelType.GuildCategory) return "Category";
+    if (channel.isThread?.()) return "Thread";
+    if (channel.isVoiceBased?.()) return "Voice";
+    return "Text / Forum";
+}
+
+function channelLabel(channel, fallbackName = "без названия") {
+    const name = clipLogText(channel?.name || fallbackName, 100);
+    return channel?.type === ChannelType.GuildCategory ? `**${name}**` : `<#${channel.id}> (**${name}**)`;
+}
+
+function permissionTargetLabel(guild, overwrite, targetId) {
+    if (targetId === guild.id) return "@everyone";
+    if (overwrite?.type === 1) return `<@${targetId}>`;
+    return `<@&${targetId}>`;
+}
+
+function permissionNames(permissionBitField) {
+    try {
+        const names = permissionBitField?.toArray?.() || [];
+        return names.length ? names.join(", ") : "нет";
+    } catch {
+        return "не удалось определить";
+    }
+}
+
+function getPermissionChanges(oldChannel, newChannel) {
+    const oldOverwrites = oldChannel.permissionOverwrites?.cache || newChannel.permissionOverwrites?.cache;
+    const newOverwrites = newChannel.permissionOverwrites?.cache || oldChannel.permissionOverwrites?.cache;
+    if (!oldOverwrites || !newOverwrites) return [];
+
+    const ids = new Set([...oldOverwrites.keys(), ...newOverwrites.keys()]);
+    const changes = [];
+    for (const id of ids) {
+        const before = oldOverwrites.get(id);
+        const after = newOverwrites.get(id);
+        const beforeAllow = before?.allow?.bitfield?.toString() || "0";
+        const afterAllow = after?.allow?.bitfield?.toString() || "0";
+        const beforeDeny = before?.deny?.bitfield?.toString() || "0";
+        const afterDeny = after?.deny?.bitfield?.toString() || "0";
+        if (beforeAllow === afterAllow && beforeDeny === afterDeny) continue;
+
+        const target = after || before;
+        changes.push(
+            `• ${permissionTargetLabel(newChannel.guild, target, id)} — ` +
+            `**разрешено:** ${permissionNames(target?.allow)}; ` +
+            `**запрещено:** ${permissionNames(target?.deny)}`
+        );
+    }
+    return changes;
+}
+
+client.on(Events.ChannelCreate, async (channel) => {
+    try {
+        if (!channel.guild) return;
+        const entry = await findRecentAuditEntry(channel.guild, AuditLogEvent.ChannelCreate, channel.id);
+        await sendForumLog(channel.guild, "channelDelete", [
+            `**Канал:** ${channelLabel(channel)}`,
+            `**ID:** \`${channel.id}\``,
+            `**Тип:** \`${channelTypeName(channel)}\``,
+            `**Кто создал:** ${formatAuditExecutor(entry)}`,
+            `**Категория:** ${channel.parentId ? `<#${channel.parentId}>` : "нет"}`
+        ], { title: "📥 Канал создан", color: 0x2ECC71 });
+    } catch (error) {
+        console.error("[CHANNEL CREATE LOG ERROR]", error);
+    }
+});
+
+client.on(Events.ChannelUpdate, async (oldChannel, newChannel) => {
+    try {
+        if (!newChannel.guild) return;
+        const nameChanged = oldChannel.name !== newChannel.name;
+        const permissionChanges = getPermissionChanges(oldChannel, newChannel);
+        if (!nameChanged && !permissionChanges.length) return;
+
+        const entry = await findRecentAuditEntry(newChannel.guild, AuditLogEvent.ChannelUpdate, newChannel.id);
+        const lines = [
+            `**Канал:** ${channelLabel(newChannel)}`,
+            `**ID:** \`${newChannel.id}\``,
+            `**Кто изменил:** ${formatAuditExecutor(entry)}`
+        ];
+
+        if (nameChanged) {
+            lines.push(`**Название до:** ${clipLogText(oldChannel.name || "без названия")}`);
+            lines.push(`**Название после:** ${clipLogText(newChannel.name || "без названия")}`);
+        }
+        if (permissionChanges.length) {
+            lines.push("**Изменение прав:**");
+            lines.push(...permissionChanges);
+        }
+
+        await sendForumLog(newChannel.guild, "channelDelete", lines, {
+            title: nameChanged && permissionChanges.length
+                ? "✏️ Изменение канала и прав"
+                : nameChanged
+                    ? "✏️ Изменение названия канала"
+                    : "🔐 Изменение прав канала",
+            color: 0xF1C40F
+        });
+    } catch (error) {
+        console.error("[CHANNEL UPDATE LOG ERROR]", error);
+    }
+});
+
 client.on(Events.ChannelDelete, async (channel) => {
     try {
         if (!channel.guild) return;
         const entry = await findRecentAuditEntry(channel.guild, AuditLogEvent.ChannelDelete, channel.id);
-        const typeName = channel.type === ChannelType.GuildCategory ? "Category" : "Channel";
         await sendForumLog(channel.guild, "channelDelete", [
-            `**Канал:** #${clipLogText(channel.name || "без названия")}`,
+            `**Канал:** ${channelLabel(channel)}`,
             `**ID:** \`${channel.id}\``,
-            `**Тип:** \`${typeName}\``,
+            `**Тип:** \`${channelTypeName(channel)}\``,
             `**Кто удалил:** ${formatAuditExecutor(entry)}`,
             `**Причина:** ${clipLogText(entry?.reason || "Причина не указана")}`
-        ]);
+        ], { title: "📤 Канал удалён", color: 0xE74C3C });
     } catch (error) {
         console.error("[CHANNEL DELETE LOG ERROR]", error);
     }
 });
-
 
 // =====================================================
 // INTERACTIONS & SLASH COMMANDS
