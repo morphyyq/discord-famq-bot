@@ -31,7 +31,8 @@ const {
     MediaGalleryItemBuilder,
     TextDisplayBuilder,
     SeparatorBuilder,
-    MessageFlags
+    MessageFlags,
+    AuditLogEvent
 } = require("discord.js");
 
 
@@ -93,6 +94,7 @@ const SERVERS = {
             AUDIT_MAIN: "1503377972541915357",
             AUDIT_RECRUIT: "1507665992497496176",
             AFK: "1520898805103595772",
+            LOG_FORUM: "1539978219380408440", // форум с логами Components V2
             PORTFOLIO_CATEGORY: "1521267379114344618" // категория для портфелей
         },
         ALLOWED_ROLES: [
@@ -184,7 +186,7 @@ function fmtPoints(value) {
 // DATABASE (MONGODB)
 // =====================================================
 let db;
-let salary = { balances: {}, recruits: {}, reports: {}, afk: {}, archive: {}, auditMessages: {}, mpPoints: {}, mpHistory: {} };
+let salary = { balances: {}, recruits: {}, reports: {}, afk: {}, archive: {}, auditMessages: {}, mpPoints: {}, mpHistory: {}, logThreads: {} };
 
 async function connectDB() {
     const client = new MongoClient(process.env.MONGO_URI);
@@ -203,6 +205,7 @@ async function connectDB() {
         else if (doc._id === "auditMessages") salary.auditMessages = doc.data || {};
         else if (doc._id === "mpPoints") salary.mpPoints = doc.data || {};
         else if (doc._id === "mpHistory") salary.mpHistory = doc.data || {};
+        else if (doc._id === "logThreads") salary.logThreads = doc.data || {};
     }
     console.log(`[DB] Данные загружены из MongoDB`);
 }
@@ -218,6 +221,7 @@ async function saveDB(data) {
         db.collection("salary").updateOne({ _id: "auditMessages" }, { $set: { data: data.auditMessages } }, { upsert: true }),
         db.collection("salary").updateOne({ _id: "mpPoints" }, { $set: { data: data.mpPoints } }, { upsert: true }),
         db.collection("salary").updateOne({ _id: "mpHistory" }, { $set: { data: data.mpHistory } }, { upsert: true }),
+        db.collection("salary").updateOne({ _id: "logThreads" }, { $set: { data: data.logThreads } }, { upsert: true }),
     ]);
 }
 
@@ -492,6 +496,192 @@ async function updateOnlineMonitor() {
 
 
 // =====================================================
+// FORUM AUDIT LOGS — отдельная публикация для каждого типа логов
+// =====================================================
+const LOG_THREAD_DEFS = {
+    roleUpdate: {
+        name: "👥 Изменение ролей",
+        title: "🎭 Изменение ролей",
+        color: 0x3498DB,
+        description: "Логи выдачи и снятия ролей с участников."
+    },
+    memberJoinLeave: {
+        name: "🚪 Входы и выходы",
+        title: "🚪 Участник зашёл/вышел",
+        color: 0x2ECC71,
+        description: "Логи входа участников на сервер и выхода с сервера."
+    },
+    messageUpdate: {
+        name: "📝 Изменение сообщений",
+        title: "📝 Изменение сообщения",
+        color: 0x3498DB,
+        description: "Логи редактирования сообщений участников."
+    },
+    afkLeave: {
+        name: "📌 Выход из AFK",
+        title: "📌 Выход из AFK списка",
+        color: 0xF1C40F,
+        description: "Логи снятия статуса AFK из системы."
+    },
+    memberKick: {
+        name: "🔨 Кики участников",
+        title: "🔨 Участник кикнут",
+        color: 0xE74C3C,
+        description: "Логи принудительного исключения участников с сервера."
+    },
+    channelDelete: {
+        name: "🗑️ Удаление каналов",
+        title: "🗑️ Канал удалён",
+        color: 0xE74C3C,
+        description: "Логи удаления каналов и категорий."
+    }
+};
+
+const logThreadLocks = new Map();
+
+function clipLogText(value, max = 1800) {
+    const text = String(value ?? "").trim();
+    if (!text) return "—";
+    return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+}
+
+function buildLogContainer({ title, color, lines, description = null }) {
+    const container = new ContainerBuilder()
+        .setAccentColor(color)
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(`## ${title}`));
+
+    if (description) {
+        container.addTextDisplayComponents(new TextDisplayBuilder().setContent(description));
+    }
+
+    container
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(lines.join("\n")))
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(`🕒 Время: <t:${Math.floor(Date.now() / 1000)}:F>`));
+
+    return container;
+}
+
+function logMessagePayload(def, lines, extra = {}) {
+    return {
+        components: [buildLogContainer({
+            title: extra.title || def.title,
+            color: extra.color || def.color,
+            lines,
+            description: extra.description || null
+        })],
+        flags: MessageFlags.IsComponentsV2,
+        // В логах сохраняем красивые упоминания, но не создаём лишние пинги.
+        allowedMentions: { parse: [] }
+    };
+}
+
+async function findRecentAuditEntry(guild, type, targetId) {
+    try {
+        // Discord иногда публикует запись аудита с небольшой задержкой.
+        await new Promise(resolve => setTimeout(resolve, 350));
+        const audit = await guild.fetchAuditLogs({ type, limit: 10 });
+        const now = Date.now();
+        return audit.entries.find(entry => {
+            const entryTargetId = entry.target?.id || entry.targetId;
+            return entryTargetId === targetId && now - entry.createdTimestamp < 15000;
+        }) || null;
+    } catch (error) {
+        console.error(`[AUDIT LOOKUP ERROR] [${INSTANCE_ID}]`, error.message || error);
+        return null;
+    }
+}
+
+async function ensureLogThread(guild, key) {
+    const def = LOG_THREAD_DEFS[key];
+    const forumId = SERVERS[guild?.id]?.CHANNELS?.LOG_FORUM;
+    if (!def || !forumId) return null;
+
+    const lockKey = `${guild.id}:${key}`;
+    if (logThreadLocks.has(lockKey)) return logThreadLocks.get(lockKey);
+
+    const promise = (async () => {
+        try {
+            const forum = await guild.channels.fetch(forumId).catch(() => null);
+            if (!forum || forum.type !== ChannelType.GuildForum) {
+                console.error(`[LOG FORUM] Канал ${forumId} не является форумом или недоступен.`);
+                return null;
+            }
+
+            salary.logThreads ||= {};
+            salary.logThreads[guild.id] ||= {};
+
+            let thread = null;
+            const savedId = salary.logThreads[guild.id][key];
+            if (savedId) {
+                thread = await forum.threads.fetch(savedId).catch(() => null);
+            }
+
+            if (!thread) {
+                const active = await forum.threads.fetchActive().catch(() => null);
+                thread = active?.threads?.find(t => t.name === def.name) || null;
+            }
+
+            if (!thread) {
+                const archived = await forum.threads.fetchArchived({ limit: 100 }).catch(() => null);
+                thread = archived?.threads?.find(t => t.name === def.name) || null;
+            }
+
+            if (!thread) {
+                thread = await forum.threads.create({
+                    name: def.name,
+                    autoArchiveDuration: 10080,
+                    reason: "Создание публикации для логов бота",
+                    message: logMessagePayload(def, [`📚 **Публикация логов создана автоматически.**`, def.description])
+                });
+            } else if (thread.archived) {
+                await thread.setArchived(false).catch(() => null);
+            }
+
+            salary.logThreads[guild.id][key] = thread.id;
+            await saveDB(salary);
+            return thread;
+        } catch (error) {
+            console.error(`[LOG THREAD ERROR] ${key}`, error);
+            return null;
+        }
+    })();
+
+    logThreadLocks.set(lockKey, promise);
+    try {
+        return await promise;
+    } finally {
+        logThreadLocks.delete(lockKey);
+    }
+}
+
+async function ensureAllLogThreads(guild) {
+    if (!guild || !SERVERS[guild.id]?.CHANNELS?.LOG_FORUM) return;
+    for (const key of Object.keys(LOG_THREAD_DEFS)) {
+        await ensureLogThread(guild, key);
+    }
+}
+
+async function sendForumLog(guild, key, lines, extra = {}) {
+    try {
+        if (!guild || !SERVERS[guild.id]?.CHANNELS?.LOG_FORUM) return;
+        const def = LOG_THREAD_DEFS[key];
+        const thread = await ensureLogThread(guild, key);
+        if (!def || !thread) return;
+        if (thread.archived) await thread.setArchived(false).catch(() => null);
+        await thread.send(logMessagePayload(def, lines, extra));
+    } catch (error) {
+        console.error(`[FORUM LOG ERROR] ${key}`, error);
+    }
+}
+
+function formatAuditExecutor(entry) {
+    return entry?.executorId ? `<@${entry.executorId}>` : "Неизвестно / аудит недоступен";
+}
+
+
+// =====================================================
 // AFK SYSTEM PANEL — Container (Components V2) со стилем как в игре
 // =====================================================
 
@@ -706,14 +896,24 @@ async function initVoiceSessions(guild) {
 // SYNC CROSS-SERVER JOIN ROLES
 // =====================================================
 client.on(Events.GuildMemberAdd, async (member) => {
-    if (member.guild.id === "1504470399268819115") {
-        const darknessGuild = await client.guilds.fetch("1458190222042075251").catch(() => null);
-        if (darknessGuild) {
-            const isMemberOfDarkness = await darknessGuild.members.fetch(member.id).catch(() => null);
-            if (isMemberOfDarkness) {
-                await member.roles.add("1504470450305241288").catch(() => null);
+    try {
+        if (member.guild.id === "1504470399268819115") {
+            const darknessGuild = await client.guilds.fetch("1458190222042075251").catch(() => null);
+            if (darknessGuild) {
+                const isMemberOfDarkness = await darknessGuild.members.fetch(member.id).catch(() => null);
+                if (isMemberOfDarkness) {
+                    await member.roles.add("1504470450305241288").catch(() => null);
+                }
             }
         }
+
+        await sendForumLog(member.guild, "memberJoinLeave", [
+            `**Пользователь:** <@${member.id}> (${clipLogText(member.user.tag)})`,
+            `**ID:** \`${member.id}\``,
+            `**Аккаунт создан:** <t:${Math.floor(member.user.createdTimestamp / 1000)}:F>`
+        ], { title: "📥 Пользователь зашёл", color: 0x2ECC71 });
+    } catch (error) {
+        console.error("[MEMBER ADD LOG ERROR]", error);
     }
 });
 
@@ -836,6 +1036,7 @@ client.once(Events.ClientReady, async () => {
     if (mainGuild) {
         await updateOnlineMonitor();
         await updateAFKEmbed(mainGuild);
+        await ensureAllLogThreads(mainGuild);
         await initVoiceSessions(mainGuild);
     }
     setInterval(updateOnlineMonitor, 60000);
@@ -902,7 +1103,33 @@ client.once(Events.ClientReady, async () => {
 // =====================================================
 client.on(Events.GuildMemberRemove, async (member) => {
     try {
+        const kickEntry = await findRecentAuditEntry(member.guild, AuditLogEvent.MemberKick, member.id);
+        const memberLogLines = [
+            `**Участник:** <@${member.id}> (${clipLogText(member.user?.tag || member.displayName)})`,
+            `**ID:** \`${member.id}\``,
+            `**Роли до выхода:** ${member.roles?.cache?.filter(r => r.id !== member.guild.id).map(r => `<@&${r.id}>`).join(", ") || "нет ролей"}`
+        ];
+
+        if (kickEntry) {
+            await sendForumLog(member.guild, "memberKick", [
+                ...memberLogLines,
+                `**Кто кикнул:** ${formatAuditExecutor(kickEntry)}`,
+                `**Причина:** ${clipLogText(kickEntry.reason || "Причина не указана")}`
+            ]);
+        } else {
+            await sendForumLog(member.guild, "memberJoinLeave", memberLogLines, {
+                title: "📤 Участник покинул сервер",
+                color: 0xE74C3C
+            });
+        }
+
         if (salary.afk && salary.afk[member.id]) {
+            const afkData = salary.afk[member.id];
+            await sendForumLog(member.guild, "afkLeave", [
+                `**Участник:** <@${member.id}>`,
+                `**Причина AFK:** ${clipLogText(afkData?.reason || "афк")}`,
+                `**Снял статус:** Система (участник покинул сервер)`
+            ]);
             delete salary.afk[member.id];
             await saveDB(salary);
             await updateAFKEmbed(member.guild);
@@ -1182,6 +1409,56 @@ client.on(Events.MessageCreate, async (msg) => {
 
     } catch (e) {
         console.log(`[MESSAGE ERROR] [${INSTANCE_ID}]`, e);
+    }
+});
+
+
+// =====================================================
+// MESSAGE UPDATE — логирование редактирования сообщений
+// =====================================================
+client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
+    try {
+        if (!newMessage.guild || newMessage.author?.bot) return;
+        if (oldMessage.partial) await oldMessage.fetch().catch(() => null);
+
+        const before = oldMessage.content || "[Текст неизвестен, сообщение не было в кеше бота]";
+        const after = newMessage.content || "[сообщение без текста / текст удалён]";
+        if (before === after) return;
+
+        const imageAttachment = newMessage.attachments?.find(a => a.contentType?.startsWith("image/"));
+        await sendForumLog(newMessage.guild, "messageUpdate", [
+            `**Автор:** <@${newMessage.author.id}> (${clipLogText(newMessage.author.tag)})`,
+            `**Канал:** <#${newMessage.channelId}>`,
+            `**Сообщение:** [перейти](https://discord.com/channels/${newMessage.guild.id}/${newMessage.channelId}/${newMessage.id})`,
+            "",
+            `**До:**\n${clipLogText(before)}`,
+            "",
+            `**После:**\n${clipLogText(after)}`,
+            imageAttachment ? `\n**Вложение:** ${imageAttachment.url}` : ""
+        ].filter(Boolean));
+    } catch (error) {
+        console.error("[MESSAGE UPDATE LOG ERROR]", error);
+    }
+});
+
+
+// =====================================================
+// CHANNEL DELETE — логирование удаления каналов и категорий
+// =====================================================
+client.on(Events.ChannelDelete, async (channel) => {
+    try {
+        if (!channel.guild) return;
+        const entry = await findRecentAuditEntry(channel.guild, AuditLogEvent.ChannelDelete, channel.id);
+        const typeName = channel.type === ChannelType.GuildCategory ? "Category" : "Channel";
+        await sendForumLog(channel.guild, "channelDelete", [
+            `**Канал:** #${clipLogText(channel.name || "без названия")}`,
+            `**ID:** \`${channel.id}\``,
+            `**Тип:** \`${typeName}\``,
+            `**Кто удалил:** ${formatAuditExecutor(entry)}`,
+            `**Причина:** ${clipLogText(entry?.reason || "Причина не указана")}`
+        ]);
+    } catch (error) {
+        console.error("[CHANNEL DELETE LOG ERROR]", error);
     }
 });
 
@@ -1736,9 +2013,16 @@ Main состав — основа нашей семьи. Здесь играю�
                     return;
                 }
 
+                const afkData = salary.afk[targetUser.id];
                 delete salary.afk[targetUser.id];
                 await saveDB(salary);
                 await updateAFKEmbed(i.guild);
+                await sendForumLog(i.guild, "afkLeave", [
+                    `**Участник:** <@${targetUser.id}>`,
+                    `**Причина AFK:** ${clipLogText(afkData?.reason || "афк")}`,
+                    `**Кто снял статус:** <@${i.user.id}>`,
+                    `**Причина снятия:** ${clipLogText(reason || "Причина не указана")}`
+                ]);
 
                 let dmSent = false;
                 const targetMember = await i.guild.members.fetch(targetUser.id).catch(() => null);
@@ -2990,8 +3274,14 @@ Main состав — основа нашей семьи. Здесь играю�
                 await i.showModal(afkModal);
             } else {
                 if (salary.afk[i.user.id]) {
+                    const afkData = salary.afk[i.user.id];
                     delete salary.afk[i.user.id];
                     await saveDB(salary);
+                    await sendForumLog(i.guild, "afkLeave", [
+                        `**Участник:** <@${i.user.id}>`,
+                        `**Причина AFK:** ${clipLogText(afkData?.reason || "афк")}`,
+                        `**Кто снял статус:** <@${i.user.id}>`
+                    ]);
                 }
                 await i.reply({ content: "🏃 Вы вернулись из АФК! Уведомления о сборах возобновлены.", ephemeral: true });
                 await updateAFKEmbed(i.guild);
@@ -3987,6 +4277,18 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
         // Роли без @everyone до и после изменения
         const oldRoles = oldMember.roles.cache.filter(r => r.id !== newMember.guild.id);
         const newRoles = newMember.roles.cache.filter(r => r.id !== newMember.guild.id);
+
+        const addedRoles = newRoles.filter(role => !oldRoles.has(role.id));
+        const removedRoles = oldRoles.filter(role => !newRoles.has(role.id));
+        if (addedRoles.size || removedRoles.size) {
+            const roleAudit = await findRecentAuditEntry(newMember.guild, AuditLogEvent.MemberRoleUpdate, newMember.id);
+            await sendForumLog(newMember.guild, "roleUpdate", [
+                `**Кто изменил:** ${formatAuditExecutor(roleAudit)}`,
+                `**Кому изменили:** <@${newMember.id}> (${clipLogText(newMember.user.tag)})`,
+                `**Выданы роли:** ${addedRoles.map(role => `<@&${role.id}>`).join(", ") || "нет"}`,
+                `**Сняты роли:** ${removedRoles.map(role => `<@&${role.id}>`).join(", ") || "нет"}`
+            ]);
+        }
 
         // Условие: раньше ролей было больше одной, теперь осталась ТОЛЬКО 1458410670071615580 и больше ничего
         const wasMoreThanOne = oldRoles.size > 1;
