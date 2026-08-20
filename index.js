@@ -229,6 +229,135 @@ const processed = new Set();
 const applications = new Map();
 const modalLocks = new Set();
 
+// channelId -> userId — кто сейчас взял заявку на рассмотрение.
+// Пока запись есть, другой рекрут не может нажать "Взять на рассмотрение".
+const ticketReviewers = new Map();
+
+
+// =====================================================
+// ЗАЯВКИ — ТИКЕТ В ВИДЕ КОНТЕЙНЕРА (Components V2)
+// =====================================================
+const APP_TYPE_TITLES = {
+    main: "Заявление — Main состав",
+    recruit: "Заявление — Recruit",
+    academy: "Заявление",
+    capture: "Заявление"
+};
+
+const APP_STATUS_COLOR = {
+    pending: 0x2b2d31,
+    review: 0xF1C40F,
+    call: 0xE67E22,
+    accepted: 0x9B59B6,
+    rejected: 0xE74C3C
+};
+
+// Текст анкеты по типу заявки (main / recruit / academy / capture)
+function buildAppBodyText(type, data) {
+    if (!data) return "*Анкета не найдена в памяти бота (бот перезапускался).*";
+
+    if (type === "main") {
+        return `**Ваш статик**\n${data.q1}\n\n**Предоставьте ваши откаты**\n${data.q5}`;
+    }
+
+    if (type === "recruit") {
+        return `**НИК И СТАТИК**\n${data.q1}\n\n**ИМЯ И ВОЗРАСТ (В РЕАЛЕ)**\n${data.q2}\n\n**ПОЧЕМУ ХОТИТЕ ПОПАСТЬ В RECRUIT?**\n${data.q3}\n\n**ОПЫТ В РЕКРУТИНГЕ / СХОЖИХ РОЛЯХ**\n${data.q4}`;
+    }
+
+    // academy / capture
+    let text = `**ВАШ СТАТИЧЕСКИЙ ID # И ВАШ НИК НЕЙМ**\n${data.q1}\n\n**ИМЯ И ВОЗРАСТ (В РЕАЛЕ)**\n${data.q2}\n\n**ЕСТЬ У ВАС ОПЫТ В СЕМЬЯХ? ГДЕ СОСТОЯЛИ?**\n${data.q3}\n\n**ПОЧЕМУ ВЫБРАЛИ Darkness? КАК УЗНАЛИ О НАС?**\n${data.q4}`;
+    if (type !== "academy" && data.q5) {
+        text += `\n\n**Предоставьте свои откаты**\n${data.q5}`;
+    }
+    return text;
+}
+
+// Строка ряда с кнопками управления заявкой.
+// reviewTaken/reviewerTag — показывают, что заявку уже кто-то рассматривает.
+// disableAll — используется, когда заявка уже закрыта (принята/отклонена) и кнопки больше не нужны.
+function buildAppButtonsRow(targetId, { reviewTaken = false, reviewerTag = null, disableAll = false } = {}) {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`app_accept_${targetId}`)
+            .setLabel("Принять")
+            .setStyle(ButtonStyle.Success)
+            .setDisabled(disableAll),
+        new ButtonBuilder()
+            .setCustomId(`app_review_${targetId}`)
+            .setLabel(reviewTaken ? `Рассматривает: ${reviewerTag}` : "Взять на рассмотрение")
+            .setStyle(reviewTaken ? ButtonStyle.Secondary : ButtonStyle.Primary)
+            .setDisabled(disableAll || reviewTaken),
+        new ButtonBuilder()
+            .setCustomId(`app_call_${targetId}`)
+            .setLabel("Вызвать на обзвон")
+            .setStyle(ButtonStyle.Primary)
+            .setDisabled(disableAll),
+        new ButtonBuilder()
+            .setCustomId(`app_reject_${targetId}`)
+            .setLabel("Отклонить")
+            .setStyle(ButtonStyle.Danger)
+            .setDisabled(disableAll)
+    );
+}
+
+// Собирает контейнер тикета заявки целиком (используется и при создании, и при каждом обновлении статуса)
+function buildAppContainer({ type, data, targetId, username, statusText, statusKey = "pending", reviewerId = null, buttonsRow = null, pingLine = null }) {
+    const title = APP_TYPE_TITLES[type] || "Заявление";
+    const container = new ContainerBuilder().setAccentColor(APP_STATUS_COLOR[statusKey] || APP_STATUS_COLOR.pending);
+
+    if (pingLine) {
+        container.addTextDisplayComponents(new TextDisplayBuilder().setContent(pingLine));
+        container.addSeparatorComponents(new SeparatorBuilder());
+    }
+
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`## 📋 ${title}`));
+
+    let statusLine = `**Статус:** ${statusText}`;
+    if (reviewerId) statusLine += ` (<@${reviewerId}>)`;
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(statusLine));
+
+    if (reviewerId) {
+        container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`👀 **Рассматривает:** <@${reviewerId}>`));
+    }
+
+    container.addSeparatorComponents(new SeparatorBuilder());
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(buildAppBodyText(type, data)));
+    container.addSeparatorComponents(new SeparatorBuilder());
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`**Пользователь:** <@${targetId}>\n**Username:** ${username}\n**ID:** ${targetId}`));
+
+    if (buttonsRow) {
+        container.addActionRowComponents(buttonsRow);
+    }
+
+    return container;
+}
+
+// Достаёт тип заявки по названию канала тикета (academy- / capture- / main- / recruit-)
+function appTypeFromChannelName(name) {
+    if (name.startsWith("main")) return "main";
+    if (name.startsWith("recruit")) return "recruit";
+    if (name.startsWith("academy")) return "academy";
+    return "capture";
+}
+
+// Ищет ID кандидата в дереве компонентов сообщения-тикета (Components V2) по customId кнопки "app_accept_<id>"
+function findAppTargetId(message) {
+    function search(components) {
+        if (!components) return null;
+        for (const c of components) {
+            if (c.customId && typeof c.customId === "string" && c.customId.startsWith("app_accept_")) {
+                return c.customId.replace("app_accept_", "");
+            }
+            if (c.components) {
+                const found = search(c.components);
+                if (found) return found;
+            }
+        }
+        return null;
+    }
+    return search(message.components);
+}
+
 
 // =====================================================
 // SALARY EMBED SYSTEM
@@ -970,12 +1099,11 @@ client.on(Events.MessageCreate, async (msg) => {
             let candidateId = "unknown";
 
             if (channelMessages) {
-                const appMessage = channelMessages.find(m => m.embeds.length > 0 && m.embeds[0].title?.startsWith("Заявление"));
+                const appMessage = channelMessages.find(m => m.author.id === client.user.id && m.flags?.has(MessageFlags.IsComponentsV2));
                 if (appMessage) {
-                    const description = appMessage.embeds[0].description || "";
-                    const userMatch = description.match(/<@(\d+)>/);
-                    if (userMatch) {
-                        candidateId = userMatch[1];
+                    const foundId = findAppTargetId(appMessage);
+                    if (foundId) {
+                        candidateId = foundId;
                         candidateText = `<@${candidateId}>`;
                     }
                 }
@@ -3233,36 +3361,24 @@ Main состав — основа нашей семьи. Здесь играю�
             const logChannel = await i.guild.channels.fetch(logChannelId).catch(() => null);
 
             if (logChannel) {
-                let originalEmbed;
-                const messages = await i.channel.messages.fetch({ limit: 50 }).catch(() => null);
-                if (messages) {
-                    const msg = messages.find(m => m.embeds.length > 0 && (
-                        m.embeds[0].description?.includes("ВАШ СТАТИЧЕСКИЙ ID") ||
-                        m.embeds[0].description?.includes("Ваш статик") ||
-                        m.embeds[0].description?.includes("НИК И СТАТИК") ||
-                        m.embeds[0].title?.startsWith("Заявление")
-                    ));
-                    if (msg) originalEmbed = msg.embeds[0];
-                }
+                const appData = applications.get(targetId);
+                const appType = appData?.type || appTypeFromChannelName(i.channel.name);
 
                 const rejectEmbed = new EmbedBuilder()
                     .setTitle(`❌ Заявка отклонена | ${isMainCh ? "Main состав" : isRecruitCh ? "Recruit" : "Семья"}`)
                     .setColor("Red")
+                    .setDescription(buildAppBodyText(appType, appData))
+                    .addFields(
+                        { name: "Кого", value: `<@${targetId}>`, inline: true },
+                        { name: "Отклонил", value: `<@${i.user.id}>`, inline: true },
+                        { name: "Причина", value: reason, inline: false }
+                    )
                     .setTimestamp();
-
-                if (originalEmbed?.description) {
-                    rejectEmbed.setDescription(originalEmbed.description);
-                }
-
-                rejectEmbed.addFields(
-                    { name: "Кого", value: `<@${targetId}>`, inline: true },
-                    { name: "Отклонил", value: `<@${i.user.id}>`, inline: true },
-                    { name: "Причина", value: reason, inline: false }
-                );
 
                 await logChannel.send({ embeds: [rejectEmbed] }).catch(() => null);
             }
 
+            ticketReviewers.delete(i.channel.id);
             await i.reply({ content: `❌ Заявка успешно отклонена. Причина зафиксирована в канале логирования.` }).catch(() => null);
             setTimeout(() => i.channel.delete().catch(() => null), 2000);
             return;
@@ -3388,53 +3504,21 @@ Main состав — основа нашей семьи. Здесь играю�
             });
 
             const rolesPing = config.ALLOWED_ROLES ? config.ALLOWED_ROLES.map(r => `<@&${r}>`).join(" ") : "";
-            const topContent = `${rolesPing} <@&1468704257606684712>\n**Предыдущие заявки:**\nЗаявок не найдено.`;
+            const pingLine = `${rolesPing} <@&1468704257606684712>\n**Предыдущие заявки:**\nЗаявок не найдено.`;
 
-            let embedDescription;
+            const buttonsRow = buildAppButtonsRow(i.user.id);
+            const container = buildAppContainer({
+                type,
+                data,
+                targetId: i.user.id,
+                username: i.user.username,
+                statusText: "Ожидает рассмотрения",
+                statusKey: "pending",
+                buttonsRow,
+                pingLine
+            });
 
-            if (type === "main") {
-                embedDescription = `**Ваш статик**
-${data.q1}
-
-**Предоставьте ваши откаты**
-${data.q5}`;
-            } else {
-                embedDescription = `**ВАШ СТАТИЧЕСКИЙ ID # И ВАШ НИК НЕЙМ**
-${data.q1}
-
-**ИМЯ И ВОЗРАСТ (В РЕАЛЕ)**
-${data.q2}
-
-**ЕСТЬ У ВАС ОПЫТ В СЕМЬЯХ? ГДЕ СОСТОЯЛИ?**
-${data.q3}
-
-**ПОЧЕМУ ВЫБРАЛИ Darkness? КАК УЗНАЛИ О НАС?**
-${data.q4}`;
-
-                if (type !== "academy") {
-                    embedDescription += `\n\n**Предоставьте свои откаты**\n${data.q5}`;
-                }
-            }
-
-            embedDescription += `\n\n**Пользователь**\n<@${i.user.id}>`;
-
-            const embed = new EmbedBuilder()
-                .setTitle("Заявление")
-                .setDescription(embedDescription)
-                .setColor("#1f8b4c")
-                .addFields(
-                    { name: "Username", value: i.user.username, inline: true },
-                    { name: "ID", value: i.user.id, inline: true }
-                );
-
-            const row = new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setCustomId(`app_accept_${i.user.id}`).setLabel("Принять").setStyle(ButtonStyle.Success),
-                new ButtonBuilder().setCustomId(`app_review_${i.user.id}`).setLabel("Взять на рассмотрение").setStyle(ButtonStyle.Primary),
-                new ButtonBuilder().setCustomId(`app_call_${i.user.id}`).setLabel("Вызвать на обзвон").setStyle(ButtonStyle.Primary),
-                new ButtonBuilder().setCustomId(`app_reject_${i.user.id}`).setLabel("Отклонить").setStyle(ButtonStyle.Danger)
-            );
-
-            await channel.send({ content: topContent, embeds: [embed], components: [row] });
+            await channel.send({ components: [container], flags: MessageFlags.IsComponentsV2 });
             await i.reply({ content: `✅ Заявка создана! Канал: <#${channel.id}>`, ephemeral: true });
 
             // Аудит лог — новая заявка (main / capture / academy)
@@ -3491,12 +3575,15 @@ ${data.q5}
             }
 
             const recruitData = {
+                type: "recruit",
                 q1: i.fields.getTextInputValue("q1"),
                 q2: i.fields.getTextInputValue("q2"),
                 q3: i.fields.getTextInputValue("q3"),
                 q4: i.fields.getTextInputValue("q4"),
                 userId: i.user.id
             };
+
+            applications.set(i.user.id, recruitData);
 
             const RECRUIT_ROLE_ID = "1519806507011805215";
 
@@ -3511,40 +3598,21 @@ ${data.q5}
                 ]
             });
 
-            const topContent = `<@&${RECRUIT_ROLE_ID}>\n**Предыдущие заявки:**\nЗаявок не найдено.`;
+            const recruitPingLine = `<@&${RECRUIT_ROLE_ID}>\n**Предыдущие заявки:**\nЗаявок не найдено.`;
 
-            const embedDescription = `**НИК И СТАТИК**
-${recruitData.q1}
+            const recruitButtonsRow = buildAppButtonsRow(i.user.id);
+            const recruitContainer = buildAppContainer({
+                type: "recruit",
+                data: recruitData,
+                targetId: i.user.id,
+                username: i.user.username,
+                statusText: "Ожидает рассмотрения",
+                statusKey: "pending",
+                buttonsRow: recruitButtonsRow,
+                pingLine: recruitPingLine
+            });
 
-**ИМЯ И ВОЗРАСТ (В РЕАЛЕ)**
-${recruitData.q2}
-
-**ПОЧЕМУ ХОТИТЕ ПОПАСТЬ В RECRUIT?**
-${recruitData.q3}
-
-**ОПЫТ В РЕКРУТИНГЕ / СХОЖИХ РОЛЯХ**
-${recruitData.q4}
-
-**Пользователь**
-<@${i.user.id}>`;
-
-            const recruitEmbed = new EmbedBuilder()
-                .setTitle("Заявление — Recruit")
-                .setDescription(embedDescription)
-                .setColor("#2b2d31")
-                .addFields(
-                    { name: "Username", value: i.user.username, inline: true },
-                    { name: "ID", value: i.user.id, inline: true }
-                );
-
-            const recruitRow = new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setCustomId(`app_accept_${i.user.id}`).setLabel("Принять").setStyle(ButtonStyle.Success),
-                new ButtonBuilder().setCustomId(`app_review_${i.user.id}`).setLabel("Взять на рассмотрение").setStyle(ButtonStyle.Primary),
-                new ButtonBuilder().setCustomId(`app_call_${i.user.id}`).setLabel("Вызвать на обзвон").setStyle(ButtonStyle.Primary),
-                new ButtonBuilder().setCustomId(`app_reject_${i.user.id}`).setLabel("Отклонить").setStyle(ButtonStyle.Danger)
-            );
-
-            await recruitChannel.send({ content: topContent, embeds: [recruitEmbed], components: [recruitRow] });
+            await recruitChannel.send({ components: [recruitContainer], flags: MessageFlags.IsComponentsV2 });
             await i.reply({ content: `✅ Заявка в Recruit создана! Канал: <#${recruitChannel.id}>`, ephemeral: true });
 
             // Аудит лог — новая заявка (recruit)
@@ -3586,13 +3654,30 @@ ${recruitData.q4}
             const targetId = i.customId.replace("call_voice_", "");
             const voiceChannelId = i.values[0];
 
+            const appData = applications.get(targetId);
+            const appType = appData?.type || appTypeFromChannelName(i.channel.name);
+            const reviewer = ticketReviewers.get(i.channel.id) || null;
+
             const messages = await i.channel.messages.fetch({ limit: 20 }).catch(() => null);
             if (messages) {
-                const appMessage = messages.find(m => m.embeds.length > 0 && m.embeds[0].title?.startsWith("Заявление"));
+                const appMessage = messages.find(m => m.author.id === client.user.id && m.flags?.has(MessageFlags.IsComponentsV2));
                 if (appMessage) {
-                    const embed = EmbedBuilder.from(appMessage.embeds[0]);
-                    embed.setColor("Orange").setTitle("Заявление (Вызов на обзвон)");
-                    await appMessage.edit({ embeds: [embed] }).catch(() => null);
+                    const targetMemberForName = await i.guild.members.fetch(targetId).catch(() => null);
+                    const buttonsRow = buildAppButtonsRow(targetId, {
+                        reviewTaken: !!reviewer,
+                        reviewerTag: reviewer?.tag || null
+                    });
+                    const updatedContainer = buildAppContainer({
+                        type: appType,
+                        data: appData,
+                        targetId,
+                        username: targetMemberForName?.user?.username || targetId,
+                        statusText: "Вызван на обзвон",
+                        statusKey: "call",
+                        reviewerId: reviewer?.id || null,
+                        buttonsRow
+                    });
+                    await appMessage.edit({ components: [updatedContainer], flags: MessageFlags.IsComponentsV2 }).catch(() => null);
                 }
             }
 
@@ -3699,17 +3784,20 @@ ${recruitData.q4}
                 const action = parts[1];
                 const targetId = parts[2];
                 const targetMember = await i.guild.members.fetch(targetId).catch(() => null);
-                const embed = EmbedBuilder.from(i.message.embeds[0]);
+
+                const isAcademy = i.channel.name.startsWith("academy");
+                const isMain = i.channel.name.startsWith("main");
+                const isRecruit = i.channel.name.startsWith("recruit");
+                const appData = applications.get(targetId);
+                const appType = appData?.type || appTypeFromChannelName(i.channel.name);
+                const appUsername = targetMember?.user?.username || targetId;
 
                 if (action === "accept") {
                     if (!targetMember) {
                         await i.reply({ content: "❌ Пользователь вышел с сервера.", ephemeral: true });
                         return;
                     }
-                    
-                    const isAcademy = i.channel.name.startsWith("academy");
-                    const isMain = i.channel.name.startsWith("main");
-                    const isRecruit = i.channel.name.startsWith("recruit");
+
                     let rolesToAdd;
                     if (isAcademy) rolesToAdd = config.ACADEMY_ROLES;
                     else if (isMain) rolesToAdd = config.MAIN_ROLES;
@@ -3726,9 +3814,17 @@ ${recruitData.q4}
                     };
                     await saveDB(salary);
 
+                    const closedContainer = buildAppContainer({
+                        type: appType,
+                        data: appData,
+                        targetId,
+                        username: appUsername,
+                        statusText: (isMain || isRecruit) ? "Принято" : "Принято и закрыто",
+                        statusKey: "accepted"
+                    });
+
                     if (isMain || isRecruit) {
-                        embed.setColor("Purple").setTitle("Заявление (Принято)");
-                        await i.update({ embeds: [embed], components: [] });
+                        await i.update({ components: [closedContainer], flags: MessageFlags.IsComponentsV2 });
                     } else {
                         await i.channel.permissionOverwrites.edit(targetId, {
                             ViewChannel: false,
@@ -3738,9 +3834,10 @@ ${recruitData.q4}
                         const cleanName = i.channel.name.replace("academy-", "").replace("capture-", "").replace("main-", "").replace("recruit-", "");
                         await i.channel.setName(`closed-${cleanName}`).catch(() => null);
 
-                        embed.setColor("Purple").setTitle("Заявление (Принято и Закрыто)");
-                        await i.update({ embeds: [embed], components: [] });
+                        await i.update({ components: [closedContainer], flags: MessageFlags.IsComponentsV2 });
                     }
+
+                    ticketReviewers.delete(i.channel.id);
 
                     const auditChannelId = isMain
                         ? config.CHANNELS.AUDIT_MAIN
@@ -3751,9 +3848,10 @@ ${recruitData.q4}
                         const auditChannel = await i.guild.channels.fetch(auditChannelId).catch(() => null);
                         if (auditChannel) {
                             const auditLabel = isMain ? "Main состав" : isRecruit ? "Recruit" : "Семья";
-                            const auditEmbed = EmbedBuilder.from(i.message.embeds[0])
+                            const auditEmbed = new EmbedBuilder()
                                 .setColor("Green")
                                 .setTitle(`✅ Заявка принята | ${auditLabel}`)
+                                .setDescription(buildAppBodyText(appType, appData))
                                 .addFields(
                                     { name: "Кого", value: `<@${targetId}>`, inline: true },
                                     { name: "Принял", value: `<@${i.user.id}>`, inline: true }
@@ -3785,22 +3883,46 @@ ${recruitData.q4}
                 }
 
                 if (action === "review") {
-                    embed.setColor("Yellow").setTitle("Заявление (На рассмотрении)");
-                    await i.update({ embeds: [embed] });
+                    // Если заявку уже кто-то рассматривает — другой рекрут забрать её не может
+                    const currentReviewer = ticketReviewers.get(i.channel.id);
+                    if (currentReviewer && currentReviewer.id !== i.user.id) {
+                        await i.reply({
+                            content: `❌ Эту заявку уже рассматривает <@${currentReviewer.id}>. Дождитесь, пока она освободится.`,
+                            ephemeral: true
+                        });
+                        return;
+                    }
 
-                    const isMainR = i.channel.name.startsWith("main");
-                    const isRecruitR = i.channel.name.startsWith("recruit");
-                    const reviewAuditId = isMainR
+                    ticketReviewers.set(i.channel.id, { id: i.user.id, tag: i.user.username });
+
+                    const reviewButtonsRow = buildAppButtonsRow(targetId, {
+                        reviewTaken: true,
+                        reviewerTag: i.user.username
+                    });
+                    const reviewContainer = buildAppContainer({
+                        type: appType,
+                        data: appData,
+                        targetId,
+                        username: appUsername,
+                        statusText: "На рассмотрении",
+                        statusKey: "review",
+                        reviewerId: i.user.id,
+                        buttonsRow: reviewButtonsRow
+                    });
+                    await i.update({ components: [reviewContainer], flags: MessageFlags.IsComponentsV2 });
+
+                    const reviewAuditId = isMain
                         ? config.CHANNELS.AUDIT_MAIN
-                        : isRecruitR
+                        : isRecruit
                             ? config.CHANNELS.AUDIT_RECRUIT
                             : config.CHANNELS.AUDIT_APP;
                     if (reviewAuditId) {
                         const auditChannel = await i.guild.channels.fetch(reviewAuditId).catch(() => null);
                         if (auditChannel) {
-                            const auditEmbed = EmbedBuilder.from(i.message.embeds[0])
+                            const auditEmbed = new EmbedBuilder()
                                 .setColor("Yellow")
                                 .setTitle("⏳ Заявка на рассмотрении")
+                                .setDescription(buildAppBodyText(appType, appData))
                                 .addFields(
                                     { name: "Кого", value: `<@${targetId}>`, inline: true },
                                     { name: "Взял на рассмотрение", value: `<@${i.user.id}>`, inline: true }
