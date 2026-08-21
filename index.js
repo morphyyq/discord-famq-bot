@@ -1336,13 +1336,31 @@ async function deleteRpMenu(userId) {
 async function sendPortfolioReportStatus(guild, userId, { status, type, details, evidenceUrl = null }) {
     await guild.channels.fetch().catch(() => null);
     const member = await guild.members.fetch(userId).catch(() => null);
-    const username = member?.user?.username?.toLowerCase().replace(/[^a-z0-9]/g, "") || null;
+    const username = member?.user?.username?.toLowerCase().replace(/[^a-z0-9]/g, "") || `user${userId.slice(-4)}`;
     const portfolioCategoryId = SERVERS[guild.id]?.CHANNELS?.PORTFOLIO_CATEGORY;
-    const portfolioChannel = guild.channels.cache.find(channel =>
+    let portfolioChannel = guild.channels.cache.find(channel =>
         channel.topic === `portfolio_${userId}` ||
         (portfolioCategoryId && channel.parentId === portfolioCategoryId && channel.permissionOverwrites?.cache?.has(userId)) ||
-        (username && channel.name === username && (!portfolioCategoryId || channel.parentId === portfolioCategoryId))
+        (channel.name === username && (!portfolioCategoryId || channel.parentId === portfolioCategoryId))
     );
+
+    if (!portfolioChannel && portfolioCategoryId) {
+        portfolioChannel = await guild.channels.create({
+            name: username.slice(0, 90),
+            type: ChannelType.GuildText,
+            parent: portfolioCategoryId,
+            topic: `portfolio_${userId}`,
+            permissionOverwrites: [
+                { id: guild.id, deny: ["ViewChannel"] },
+                { id: userId, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory", "AttachFiles"] },
+                { id: client.user.id, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory", "ManageMessages"] }
+            ]
+        }).catch(error => {
+            console.error(`[PORTFOLIO CREATE ERROR] ${userId}`, error);
+            return null;
+        });
+    }
+
     if (!portfolioChannel) {
         console.warn(`[PORTFOLIO REPORT] Канал портфеля не найден для ${userId}`);
         return;
@@ -1355,7 +1373,7 @@ async function sendPortfolioReportStatus(guild, userId, { status, type, details,
     const container = buildReportReviewContainer({
         userId,
         title: `<@${userId}>`,
-        details: `**Статус:** ${status}\n**Тип:** ${type}\n${details}${evidenceUrl ? `\n**Доказательство:** ${evidenceUrl}` : ""}`,
+        details: `**Статус:** ${status}\n**Тип:** ${type}\n${details}${evidenceUrl ? `\n**Доказательство:** ${evidenceUrl}` : ""}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
         color: colors[status] || 0x2B2D31,
         evidenceUrl
     });
