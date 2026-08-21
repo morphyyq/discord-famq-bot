@@ -231,6 +231,7 @@ async function saveDB(data) {
 // =====================================================
 const processed = new Set();
 const applications = new Map();
+const reportReviewLinks = new Map();
 const modalLocks = new Set();
 
 // channelId -> userId — кто сейчас взял заявку на рассмотрение.
@@ -1295,6 +1296,30 @@ client.on(Events.GuildMemberRemove, async (member) => {
 // =====================================================
 // MESSAGE SYSTEM
 // =====================================================
+function buildReportReviewContainer({ userId, title, details, color = 0x3498DB, evidenceUrl = null, buttons = null }) {
+    const container = new ContainerBuilder()
+        .setAccentColor(color)
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(`## ${title}`))
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(details));
+
+    if (evidenceUrl) {
+        const isImage = evidenceUrl.startsWith("attachment://") ||
+            /\.(png|jpe?g|gif|webp)(?:\?|$)/i.test(evidenceUrl) ||
+            evidenceUrl.includes("cdn.discordapp.com/attachments/");
+        if (isImage) {
+            container.addMediaGalleryComponents(
+                new MediaGalleryBuilder().addItems(
+                    new MediaGalleryItemBuilder().setURL(evidenceUrl)
+                )
+            );
+        }
+    }
+
+    if (buttons) container.addActionRowComponents(buttons);
+    return container;
+}
+
 client.on(Events.MessageCreate, async (msg) => {
     try {
         if (!msg.guild || msg.author.bot) return;
@@ -1311,12 +1336,12 @@ client.on(Events.MessageCreate, async (msg) => {
         const awaitRpKey = `rp_await_${msg.author.id}`;
         if (applications.has(awaitRpKey)) {
             const att = msg.attachments.filter(a => a.contentType?.startsWith("image")).first();
-            if (!att) return; // ждём именно картинку
+            const evidenceLink = msg.content?.match(/https?:\/\/\S+/i)?.[0] || null;
+            if (!att && !evidenceLink) return; // принимаем фото или ссылку
 
             const rpData = applications.get(awaitRpKey);
             applications.delete(awaitRpKey);
 
-            // Забираем доступ обратно
             const rpChannel = await client.channels.fetch(rpData.channelId).catch(() => null);
             if (rpChannel) {
                 await rpChannel.permissionOverwrites.delete(msg.author.id).catch(() => null);
@@ -1325,23 +1350,11 @@ client.on(Events.MessageCreate, async (msg) => {
             const reviewChannel = await client.channels.fetch(MP_REVIEW_CHANNEL).catch(() => null);
             if (!reviewChannel) return;
 
-            const file = new AttachmentBuilder(att.url, { name: "rp_screen.png" });
-
             const rpName = rpData.rpName || rpData.label;
+            const fileName = "rp_screen.png";
+            const file = att ? new AttachmentBuilder(att.url, { name: fileName }) : null;
+            const evidenceUrl = file ? `attachment://${fileName}` : evidenceLink;
 
-            const embed = new EmbedBuilder()
-                .setTitle(`${rpData.emoji} ${rpData.label} | На проверке`)
-                .setDescription(
-                    `👤 **Игрок:** <@${msg.author.id}>\n` +
-                    `📝 **Тип:** ${rpData.label}\n` +
-                    `🎯 **Название:** ${rpName}\n` +
-                    `🏆 **Баллов при одобрении:** +${rpData.points}`
-                )
-                .setImage("attachment://rp_screen.png")
-                .setColor("Blue")
-                .setTimestamp();
-
-            // Кодируем название в base64 чтобы передать в customId (убираем спецсимволы)
             const encodedName = Buffer.from(rpName).toString("base64").replace(/=/g, "");
             const row = new ActionRowBuilder().addComponents(
                 new ButtonBuilder()
@@ -1354,24 +1367,31 @@ client.on(Events.MessageCreate, async (msg) => {
                     .setStyle(ButtonStyle.Danger)
             );
 
-            await reviewChannel.send({ embeds: [embed], files: [file], components: [row] });
-            await sendRpReportToPersonalChannel(msg.guild, msg.author.id, rpData, att.url);
-
-            // Удаляем сообщение игрока
+            const container = buildReportReviewContainer({
+                userId: msg.author.id,
+                title: `<@${msg.author.id}>`,
+                details: `**Статус:** На проверке\n**Тип:** ${rpData.label}\n**Название:** ${rpName}\n**Баллов при одобрении:** +${rpData.points}\n**Доказательство:** ${evidenceLink || "прикреплено изображением"}`,
+                color: 0x3498DB,
+                evidenceUrl,
+                buttons: row
+            });
+            const payload = { components: [container], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
+            if (file) payload.files = [file];
+            await reviewChannel.send(payload);
+            await sendRpReportToPersonalChannel(msg.guild, msg.author.id, rpData, att?.url || evidenceLink);
             await msg.delete().catch(() => null);
-
             return;
         }
 
         const awaitKey = `mp_await_${msg.author.id}`;
         if (applications.has(awaitKey)) {
             const att = msg.attachments.filter(a => a.contentType?.startsWith("image")).first();
-            if (!att) return; // ждём именно картинку
+            const evidenceLink = msg.content?.match(/https?:\/\/\S+/i)?.[0] || null;
+            if (!att && !evidenceLink) return; // принимаем фото или ссылку
 
             const mpData = applications.get(awaitKey);
             applications.delete(awaitKey);
 
-            // Забираем временный доступ обратно
             const mpScreenChannel = await client.channels.fetch(mpData.channelId).catch(() => null);
             if (mpScreenChannel) {
                 await mpScreenChannel.permissionOverwrites.delete(msg.author.id).catch(() => null);
@@ -1380,16 +1400,10 @@ client.on(Events.MessageCreate, async (msg) => {
             const reviewChannel = await client.channels.fetch(MP_REVIEW_CHANNEL).catch(() => null);
             if (!reviewChannel) return;
 
-            const file = new AttachmentBuilder(att.url, { name: "mp_screen.png" });
-
-            const embed = new EmbedBuilder()
-                .setTitle(`🎮 МП Отчёт | ${mpData.mpType}`)
-                .setDescription(`👤 **Игрок:** <@${msg.author.id}>\n🎮 **МПшка:** ${mpData.mpType}\n${mpData.result === "win" ? "✅" : "❌"} **Результат:** ${mpData.result === "win" ? "Win" : "Lose"}\n🏆 **Баллов к начислению:** +${mpData.points}`)
-                .setImage("attachment://mp_screen.png")
-                .setColor(mpData.result === "win" ? "Blue" : "Orange")
-                .setTimestamp();
-
-            const safeId = `${msg.author.id}_${mpData.mpType.replace(/ /g,"")}_${mpData.result}_${mpData.points}_${mpData.channelId}`;
+            const fileName = "mp_screen.png";
+            const file = att ? new AttachmentBuilder(att.url, { name: fileName }) : null;
+            const evidenceUrl = file ? `attachment://${fileName}` : evidenceLink;
+            const safeId = `${msg.author.id}_${mpData.mpType.replace(/ /g, "")}_${mpData.result}_${mpData.points}_${mpData.channelId}`;
             const row = new ActionRowBuilder().addComponents(
                 new ButtonBuilder()
                     .setCustomId(`mp_accept_${safeId}`)
@@ -1401,11 +1415,18 @@ client.on(Events.MessageCreate, async (msg) => {
                     .setStyle(ButtonStyle.Danger)
             );
 
-            await reviewChannel.send({ embeds: [embed], files: [file], components: [row] });
-
-            // Удаляем сообщение со скрином от игрока
+            const container = buildReportReviewContainer({
+                userId: msg.author.id,
+                title: `<@${msg.author.id}>`,
+                details: `**Статус:** На проверке\n**Тип:** МП отчёт\n**МПшка:** ${mpData.mpType}\n**Результат:** ${mpData.result === "win" ? "Win" : "Lose"}\n**Баллов к начислению:** +${mpData.points}\n**Доказательство:** ${evidenceLink || "прикреплено изображением"}`,
+                color: mpData.result === "win" ? 0x3498DB : 0xF39C12,
+                evidenceUrl,
+                buttons: row
+            });
+            const payload = { components: [container], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
+            if (file) payload.files = [file];
+            await reviewChannel.send(payload);
             await msg.delete().catch(() => null);
-
             return;
         }
 
@@ -2948,7 +2969,7 @@ Main состав — основа нашей семьи. Здесь играю�
             if (!salary.mpHistory[userId]) salary.mpHistory[userId] = [];
 
             // Получаем url картинки из embed
-            const imgUrl = i.message.embeds[0]?.image?.url || null;
+            const imgUrl = i.message.attachments?.first()?.url || null;
 
             salary.mpHistory[userId].push({
                 mp: mpType, result, points,
@@ -2958,12 +2979,14 @@ Main состав — основа нашей семьи. Здесь играю�
 
             await saveDB(salary);
 
-            const acceptEmbed = EmbedBuilder.from(i.message.embeds[0])
-                .setColor("Green")
-                .setTitle(`✅ МП Отчёт принят | ${mpType}`)
-                .addFields({ name: "Принял", value: `<@${i.user.id}>`, inline: true });
-
-            await i.update({ embeds: [acceptEmbed], components: [] });
+            const acceptContainer = buildReportReviewContainer({
+                userId,
+                title: `<@${userId}>`,
+                details: `**Статус:** ✅ МП отчёт принят\n**МПшка:** ${mpType}\n**Результат:** ${result === "win" ? "Win" : "Lose"}\n**Баллов начислено:** +${points}\n**Принял:** <@${i.user.id}>`,
+                color: 0x2ECC71,
+                evidenceUrl: imgUrl
+            });
+            await i.update({ components: [acceptContainer], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } });
 
             // Уведомляем игрока в канале уведомлений
             const acceptNotifChannel = await client.channels.fetch(MP_REJECTED_CHANNEL).catch(() => null);
@@ -3017,12 +3040,13 @@ Main состав — основа нашей семьи. Здесь играю�
             const userId = parts[2];
             const mpType = parts[3];
 
-            const rejectEmbed = EmbedBuilder.from(i.message.embeds[0])
-                .setColor("Red")
-                .setTitle(`❌ МП Отчёт отклонён | ${mpType}`)
-                .addFields({ name: "Отклонил", value: `<@${i.user.id}>`, inline: true });
-
-            await i.update({ embeds: [rejectEmbed], components: [] });
+            const rejectContainer = buildReportReviewContainer({
+                userId,
+                title: `<@${userId}>`,
+                details: `**Статус:** ❌ МП отчёт отклонён\n**МПшка:** ${mpType}\n**Отклонил:** <@${i.user.id}>`,
+                color: 0xE74C3C
+            });
+            await i.update({ components: [rejectContainer], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } });
 
             // Уведомление в канал отклонений
             const rejectChannel = await client.channels.fetch(MP_REJECTED_CHANNEL).catch(() => null);
@@ -3287,7 +3311,7 @@ Main состав — основа нашей семьи. Здесь играю�
             // Записываем в историю
             if (!salary.mpHistory[userId]) salary.mpHistory[userId] = [];
             const reportNum = salary.mpHistory[userId].length + 1;
-            const imgUrl = i.message.embeds[0]?.image?.url || null;
+            const imgUrl = i.message.attachments?.first()?.url || null;
             salary.mpHistory[userId].push({
                 mp: rpName, result: "win", points,
                 ts: Math.floor(Date.now() / 1000),
@@ -3295,15 +3319,14 @@ Main состав — основа нашей семьи. Здесь играю�
             });
             await saveDB(salary);
 
-            const acceptEmbed = EmbedBuilder.from(i.message.embeds[0])
-                .setColor("Green")
-                .setTitle(`✅ ${label} | Одобрен`)
-                .addFields(
-                    { name: `Принятый отчёт №${reportNum}`, value: `Название: ${rpName}`, inline: false },
-                    { name: "Одобрил", value: `<@${i.user.id}>`, inline: true }
-                );
-
-            await i.update({ embeds: [acceptEmbed], components: [] });
+            const acceptContainer = buildReportReviewContainer({
+                userId,
+                title: `<@${userId}>`,
+                details: `**Статус:** ✅ ${label} одобрен\n**Принятый отчёт №:** ${reportNum}\n**Название:** ${rpName}\n**Начислено:** +${points}\n**Одобрил:** <@${i.user.id}>`,
+                color: 0x2ECC71,
+                evidenceUrl: imgUrl
+            });
+            await i.update({ components: [acceptContainer], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } });
 
             // Ищем портфель игрока и пишем туда
             const portfolioChannel = i.guild.channels.cache.find(
@@ -3337,12 +3360,13 @@ Main состав — основа нашей семьи. Здесь играю�
         if (i.isButton() && i.customId.startsWith("rp_reject_")) {
             const userId = i.customId.replace("rp_reject_", "");
 
-            const rejectEmbed = EmbedBuilder.from(i.message.embeds[0])
-                .setColor("Red")
-                .setTitle(i.message.embeds[0].title?.replace("На проверке", "Отклонён") || "❌ Отклонён")
-                .addFields({ name: "Отклонил", value: `<@${i.user.id}>`, inline: true });
-
-            await i.update({ embeds: [rejectEmbed], components: [] });
+            const rejectContainer = buildReportReviewContainer({
+                userId,
+                title: `<@${userId}>`,
+                details: `**Статус:** ❌ РП отчёт отклонён\n**Отклонил:** <@${i.user.id}>`,
+                color: 0xE74C3C
+            });
+            await i.update({ components: [rejectContainer], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } });
 
             const notifChannel = await client.channels.fetch(MP_REJECTED_CHANNEL).catch(() => null);
             if (notifChannel) {
@@ -3492,15 +3516,6 @@ Main состав — основа нашей семьи. Здесь играю�
 
             const reviewChannel = await client.channels.fetch(MP_REVIEW_CHANNEL).catch(() => null);
 
-            const submitEmbed = new EmbedBuilder()
-                .setTitle("🎬 Откат | На проверке")
-                .setDescription(
-                    `👤 **Игрок:** <@${i.user.id}>\n` +
-                    `🔗 **Ссылка:** ${otkatLink}`
-                )
-                .setColor("Blue")
-                .setTimestamp();
-
             const reviewRow = new ActionRowBuilder().addComponents(
                 new ButtonBuilder()
                     .setCustomId(`otkat_accept_${i.user.id}`)
@@ -3512,8 +3527,22 @@ Main состав — основа нашей семьи. Здесь играю�
                     .setStyle(ButtonStyle.Danger)
             );
 
+            const submitContainer = buildReportReviewContainer({
+                userId: i.user.id,
+                title: `<@${i.user.id}>`,
+                details: `**Статус:** На проверке\n**Тип:** Откат\n**Ссылка на доказательство:** ${otkatLink}`,
+                color: 0x3498DB,
+                evidenceUrl: otkatLink,
+                buttons: reviewRow
+            });
+
             if (reviewChannel) {
-                await reviewChannel.send({ embeds: [submitEmbed], components: [reviewRow] }).catch(() => null);
+                const reviewMessage = await reviewChannel.send({
+                    components: [submitContainer],
+                    flags: MessageFlags.IsComponentsV2,
+                    allowedMentions: { parse: [] }
+                }).catch(() => null);
+                if (reviewMessage) reportReviewLinks.set(reviewMessage.id, otkatLink);
             }
 
             await i.reply({ content: "✅ Ваш откат отправлен на проверку администрации.", ephemeral: true });
@@ -3523,18 +3552,20 @@ Main состав — основа нашей семьи. Здесь играю�
         if (i.isButton() && i.customId.startsWith("otkat_accept_")) {
             const userId = i.customId.replace("otkat_accept_", "");
 
-            const acceptEmbed = EmbedBuilder.from(i.message.embeds[0])
-                .setColor("Green")
-                .setTitle("✅ Откат | Принят")
-                .addFields({ name: "Принял", value: `<@${i.user.id}>`, inline: true });
-
-            await i.update({ embeds: [acceptEmbed], components: [] });
+            const acceptContainer = buildReportReviewContainer({
+                userId,
+                title: `<@${userId}>`,
+                details: `**Статус:** ✅ Откат принят\n**Принял:** <@${i.user.id}>`,
+                color: 0x2ECC71
+            });
+            await i.update({ components: [acceptContainer], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } });
 
             // Ищем портфель игрока и пишем туда вместо общего уведомления
             const portfolioChannel = i.guild.channels.cache.find(
                 c => c.topic === `portfolio_${userId}`
             );
-            const otkatLink = i.message.embeds[0]?.description?.match(/\*\*Ссылка:\*\*\s*(\S+)/)?.[1] || null;
+            const otkatLink = reportReviewLinks.get(i.message.id) || null;
+            reportReviewLinks.delete(i.message.id);
             const nowStr = new Date().toLocaleDateString("ru-RU") + " " + new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
 
             if (portfolioChannel) {
@@ -3555,12 +3586,13 @@ Main состав — основа нашей семьи. Здесь играю�
         if (i.isButton() && i.customId.startsWith("otkat_reject_")) {
             const userId = i.customId.replace("otkat_reject_", "");
 
-            const rejectEmbed = EmbedBuilder.from(i.message.embeds[0])
-                .setColor("Red")
-                .setTitle("❌ Откат | Отклонён")
-                .addFields({ name: "Отклонил", value: `<@${i.user.id}>`, inline: true });
-
-            await i.update({ embeds: [rejectEmbed], components: [] });
+            const rejectContainer = buildReportReviewContainer({
+                userId,
+                title: `<@${userId}>`,
+                details: `**Статус:** ❌ Откат отклонён\n**Отклонил:** <@${i.user.id}>`,
+                color: 0xE74C3C
+            });
+            await i.update({ components: [rejectContainer], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } });
 
             const notifChannel = await client.channels.fetch(MP_REJECTED_CHANNEL).catch(() => null);
             if (notifChannel) {
@@ -3588,6 +3620,9 @@ Main состав — основа нашей семьи. Здесь играю�
             );
 
             if (existingChannel) {
+                if (existingChannel.name !== portfolioChannelName) {
+                    await existingChannel.setName(portfolioChannelName).catch(() => null);
+                }
                 await i.editReply({ content: `📁 У вас уже есть портфель: ${existingChannel}` });
                 return;
             }
@@ -5082,7 +5117,11 @@ async function sendRpReportToPersonalChannel(guild, userId, rpData, evidenceUrl)
             `**Доказательство:** ${evidenceUrl}`
         ));
 
-    if (evidenceUrl) {
+    const evidenceIsImage = evidenceUrl && (
+        /\.(png|jpe?g|gif|webp)(?:\?|$)/i.test(evidenceUrl) ||
+        evidenceUrl.includes("cdn.discordapp.com/attachments/")
+    );
+    if (evidenceIsImage) {
         container.addMediaGalleryComponents(
             new MediaGalleryBuilder().addItems(
                 new MediaGalleryItemBuilder().setURL(evidenceUrl)
