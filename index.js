@@ -1297,6 +1297,18 @@ client.on(Events.GuildMemberRemove, async (member) => {
 // =====================================================
 // MESSAGE SYSTEM
 // =====================================================
+async function downloadReportImage(url, fileName) {
+    try {
+        const response = await fetch(url);
+        if (!response.ok) return null;
+        const buffer = Buffer.from(await response.arrayBuffer());
+        return new AttachmentBuilder(buffer, { name: fileName });
+    } catch (error) {
+        console.error("[REPORT IMAGE DOWNLOAD ERROR]", error.message || error);
+        return null;
+    }
+}
+
 function buildReportReviewContainer({ userId, title, details, color = 0x3498DB, evidenceUrl = null, buttons = null }) {
     const container = new ContainerBuilder()
         .setAccentColor(color)
@@ -1381,8 +1393,8 @@ client.on(Events.MessageCreate, async (msg) => {
 
             const rpName = rpData.rpName || rpData.label;
             const fileName = "rp_screen.png";
-            const file = att ? new AttachmentBuilder(att.url, { name: fileName }) : null;
-            const evidenceUrl = file ? `attachment://${fileName}` : evidenceLink;
+            const file = att ? await downloadReportImage(att.url, fileName) : null;
+            const evidenceUrl = file ? `attachment://${fileName}` : (evidenceLink || att?.url || null);
 
             const encodedName = Buffer.from(rpName).toString("base64").replace(/=/g, "");
             const row = new ActionRowBuilder().addComponents(
@@ -1431,8 +1443,8 @@ client.on(Events.MessageCreate, async (msg) => {
             if (!reviewChannel) return;
 
             const fileName = "mp_screen.png";
-            const file = att ? new AttachmentBuilder(att.url, { name: fileName }) : null;
-            const evidenceUrl = file ? `attachment://${fileName}` : evidenceLink;
+            const file = att ? await downloadReportImage(att.url, fileName) : null;
+            const evidenceUrl = file ? `attachment://${fileName}` : (evidenceLink || att?.url || null);
             const safeId = `${msg.author.id}_${mpData.mpType.replace(/ /g, "")}_${mpData.result}_${mpData.points}_${mpData.channelId}`;
             const row = new ActionRowBuilder().addComponents(
                 new ButtonBuilder()
