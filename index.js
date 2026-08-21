@@ -232,6 +232,7 @@ async function saveDB(data) {
 const processed = new Set();
 const applications = new Map();
 const reportReviewLinks = new Map();
+const reportReviewMeta = new Map();
 const modalLocks = new Set();
 
 // channelId -> userId — кто сейчас взял заявку на рассмотрение.
@@ -1320,6 +1321,33 @@ function buildReportReviewContainer({ userId, title, details, color = 0x3498DB, 
     return container;
 }
 
+function scheduleEphemeralDelete(interaction, delay = 120000) {
+    setTimeout(() => interaction.deleteReply().catch(() => null), delay);
+}
+
+async function sendPortfolioReportStatus(guild, userId, { status, type, details, evidenceUrl = null }) {
+    const portfolioChannel = guild.channels.cache.find(channel => channel.topic === `portfolio_${userId}`);
+    if (!portfolioChannel) return;
+
+    const colors = {
+        "Принят": 0x2ECC71,
+        "Отклонён": 0xE74C3C
+    };
+    const container = buildReportReviewContainer({
+        userId,
+        title: `<@${userId}>`,
+        details: `**Статус:** ${status}\\n**Тип:** ${type}\\n${details}`,
+        color: colors[status] || 0x2B2D31,
+        evidenceUrl
+    });
+
+    await portfolioChannel.send({
+        components: [container],
+        flags: MessageFlags.IsComponentsV2,
+        allowedMentions: { parse: [] }
+    }).catch(error => console.error("[PORTFOLIO REPORT ERROR]", error));
+}
+
 client.on(Events.MessageCreate, async (msg) => {
     try {
         if (!msg.guild || msg.author.bot) return;
@@ -1340,6 +1368,7 @@ client.on(Events.MessageCreate, async (msg) => {
             if (!att && !evidenceLink) return; // принимаем фото или ссылку
 
             const rpData = applications.get(awaitRpKey);
+            await rpData.deletePrompt?.();
             applications.delete(awaitRpKey);
 
             const rpChannel = await client.channels.fetch(rpData.channelId).catch(() => null);
@@ -1377,7 +1406,8 @@ client.on(Events.MessageCreate, async (msg) => {
             });
             const payload = { components: [container], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
             if (file) payload.files = [file];
-            await reviewChannel.send(payload);
+            const reviewMessage = await reviewChannel.send(payload);
+            if (reviewMessage) reportReviewMeta.set(reviewMessage.id, { evidenceUrl: att?.url || evidenceLink, type: rpData.label });
             await sendRpReportToPersonalChannel(msg.guild, msg.author.id, rpData, att?.url || evidenceLink);
             await msg.delete().catch(() => null);
             return;
@@ -1425,7 +1455,8 @@ client.on(Events.MessageCreate, async (msg) => {
             });
             const payload = { components: [container], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
             if (file) payload.files = [file];
-            await reviewChannel.send(payload);
+            const reviewMessage = await reviewChannel.send(payload);
+            if (reviewMessage) reportReviewMeta.set(reviewMessage.id, { evidenceUrl: att?.url || evidenceLink, type: "МП отчёт" });
             await msg.delete().catch(() => null);
             return;
         }
@@ -2925,9 +2956,9 @@ Main состав — основа нашей семьи. Здесь играю�
                 .setDescription(
                     `✅ **МП:** ${mpType} | **Результат:** ${result === "win" ? "Win ✅" : "Lose ❌"} | **Баллы:** +${points}\n\n` +
                     `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-                    `📂 **Шаг 3: Прикрепите скриншот к сообщению**\n\n` +
-                    `> 🖱️ Перетащите файлы сюда или **выберите**\n` +
-                    `> Загрузите до **1 файла** размером не более **10 МБ**\n\n` +
+                    `📂 **Шаг 3: Отправьте фото или ссылку на доказательство**\n\n` +
+                    `> 🖼️ Прикрепите изображение к сообщению или вставьте URL\n` +
+                    `> Можно отправить 1 файл размером не более **10 МБ**\n\n` +
                     `━━━━━━━━━━━━━━━━━━━━━━\n` +
                     `⚠️ *У вас есть **1 минута** на отправку скриншота. После этого доступ будет закрыт.*`
                 )
@@ -2969,7 +3000,8 @@ Main состав — основа нашей семьи. Здесь играю�
             if (!salary.mpHistory[userId]) salary.mpHistory[userId] = [];
 
             // Получаем url картинки из embed
-            const imgUrl = i.message.attachments?.first()?.url || null;
+            const reviewMeta = reportReviewMeta.get(i.message.id) || {};
+            const imgUrl = i.message.attachments?.first()?.url || reviewMeta.evidenceUrl || null;
 
             salary.mpHistory[userId].push({
                 mp: mpType, result, points,
@@ -2987,6 +3019,13 @@ Main состав — основа нашей семьи. Здесь играю�
                 evidenceUrl: imgUrl
             });
             await i.update({ components: [acceptContainer], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } });
+            reportReviewMeta.delete(i.message.id);
+            await sendPortfolioReportStatus(i.guild, userId, {
+                status: "Принят",
+                type: `МПшка ${mpType}`,
+                details: `**Результат:** ${result === "win" ? "Win" : "Lose"}\n**Баллов:** +${points}\n**Принял:** <@${i.user.id}>`,
+                evidenceUrl: imgUrl
+            });
 
             // Уведомляем игрока в канале уведомлений
             const acceptNotifChannel = await client.channels.fetch(MP_REJECTED_CHANNEL).catch(() => null);
@@ -3047,6 +3086,14 @@ Main состав — основа нашей семьи. Здесь играю�
                 color: 0xE74C3C
             });
             await i.update({ components: [rejectContainer], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } });
+            const rejectMeta = reportReviewMeta.get(i.message.id) || {};
+            reportReviewMeta.delete(i.message.id);
+            await sendPortfolioReportStatus(i.guild, userId, {
+                status: "Отклонён",
+                type: `МПшка ${mpType}`,
+                details: `**Отклонил:** <@${i.user.id}>`,
+                evidenceUrl: rejectMeta.evidenceUrl || null
+            });
 
             // Уведомление в канал отклонений
             const rejectChannel = await client.channels.fetch(MP_REJECTED_CHANNEL).catch(() => null);
@@ -3193,13 +3240,15 @@ Main состав — основа нашей семьи. Здесь играю�
                     points: typeData.points,
                     emoji: typeData.emoji,
                     channelId: i.channelId,
-                    userId: i.user.id
+                    userId: i.user.id,
+                    deletePrompt: () => i.deleteReply().catch(() => null)
                 });
 
                 await i.reply({
-                    content: `${typeData.emoji} **${typeData.label}**\n\n📎 Отправьте скриншот-доказательство **прямо в этот канал**.\n⚠️ У вас есть **2 минуты**, иначе заявка отменится.`,
+                    content: `${typeData.emoji} **${typeData.label}**\n\n📎 Отправьте **фото или ссылку** на доказательство прямо в этот канал.\n⚠️ У вас есть **2 минуты**, иначе заявка отменится.`,
                     ephemeral: true
                 });
+                scheduleEphemeralDelete(i);
 
                 setTimeout(async () => {
                     if (applications.has(awaitRpKey)) {
@@ -3261,7 +3310,8 @@ Main состав — основа нашей семьи. Здесь играю�
                 points: typeData.points,
                 emoji: typeData.emoji,
                 channelId: i.channelId,
-                userId: i.user.id
+                userId: i.user.id,
+                deletePrompt: () => i.deleteReply().catch(() => null)
             });
 
             await i.reply({
@@ -3271,6 +3321,7 @@ Main состав — основа нашей семьи. Здесь играю�
 ⚠️ У вас есть **2 минуты**, иначе заявка отменится.`,
                 ephemeral: true
             });
+            scheduleEphemeralDelete(i);
 
             // Таймер
             setTimeout(async () => {
@@ -3311,7 +3362,8 @@ Main состав — основа нашей семьи. Здесь играю�
             // Записываем в историю
             if (!salary.mpHistory[userId]) salary.mpHistory[userId] = [];
             const reportNum = salary.mpHistory[userId].length + 1;
-            const imgUrl = i.message.attachments?.first()?.url || null;
+            const reviewMeta = reportReviewMeta.get(i.message.id) || {};
+            const imgUrl = i.message.attachments?.first()?.url || reviewMeta.evidenceUrl || null;
             salary.mpHistory[userId].push({
                 mp: rpName, result: "win", points,
                 ts: Math.floor(Date.now() / 1000),
@@ -3328,24 +3380,13 @@ Main состав — основа нашей семьи. Здесь играю�
             });
             await i.update({ components: [acceptContainer], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } });
 
-            // Ищем портфель игрока и пишем туда
-            const portfolioChannel = i.guild.channels.cache.find(
-                c => c.topic === `portfolio_${userId}`
-            );
-            const nowStr = new Date().toLocaleDateString("ru-RU") + " " + new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
-            if (portfolioChannel) {
-                const portfolioEmbed = new EmbedBuilder()
-                    .setTitle(`РП отчёт • ✅ Одобрен`)
-                    .setDescription(
-                        `**Принятый отчёт №${reportNum}**\n` +
-                        `**Название:** ${rpName}\n` +
-                        `**Серия:** [Открыть скрин](${imgUrl || "https://discord.com"})\n` +
-                        `**Дата:** ${nowStr}`
-                    )
-                    .setColor("Green")
-                    .setTimestamp();
-                await portfolioChannel.send({ embeds: [portfolioEmbed] }).catch(() => null);
-            }
+            reportReviewMeta.delete(i.message.id);
+            await sendPortfolioReportStatus(i.guild, userId, {
+                status: "Принят",
+                type: label,
+                details: `**Отчёт №:** ${reportNum}\n**Название:** ${rpName}\n**Баллов:** +${points}\n**Одобрил:** <@${i.user.id}>`,
+                evidenceUrl: imgUrl
+            });
 
             // Уведомление в общий канал
             const notifChannel = await client.channels.fetch(MP_REJECTED_CHANNEL).catch(() => null);
@@ -3367,6 +3408,14 @@ Main состав — основа нашей семьи. Здесь играю�
                 color: 0xE74C3C
             });
             await i.update({ components: [rejectContainer], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } });
+            const rejectMeta = reportReviewMeta.get(i.message.id) || {};
+            reportReviewMeta.delete(i.message.id);
+            await sendPortfolioReportStatus(i.guild, userId, {
+                status: "Отклонён",
+                type: "РП отчёт",
+                details: `**Отклонил:** <@${i.user.id}>`,
+                evidenceUrl: rejectMeta.evidenceUrl || null
+            });
 
             const notifChannel = await client.channels.fetch(MP_REJECTED_CHANNEL).catch(() => null);
             if (notifChannel) {
@@ -3542,7 +3591,10 @@ Main состав — основа нашей семьи. Здесь играю�
                     flags: MessageFlags.IsComponentsV2,
                     allowedMentions: { parse: [] }
                 }).catch(() => null);
-                if (reviewMessage) reportReviewLinks.set(reviewMessage.id, otkatLink);
+                if (reviewMessage) {
+                    reportReviewLinks.set(reviewMessage.id, otkatLink);
+                    reportReviewMeta.set(reviewMessage.id, { evidenceUrl: otkatLink, type: "Откат" });
+                }
             }
 
             await i.reply({ content: "✅ Ваш откат отправлен на проверку администрации.", ephemeral: true });
@@ -3560,26 +3612,15 @@ Main состав — основа нашей семьи. Здесь играю�
             });
             await i.update({ components: [acceptContainer], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } });
 
-            // Ищем портфель игрока и пишем туда вместо общего уведомления
-            const portfolioChannel = i.guild.channels.cache.find(
-                c => c.topic === `portfolio_${userId}`
-            );
-            const otkatLink = reportReviewLinks.get(i.message.id) || null;
+            const otkatMeta = reportReviewMeta.get(i.message.id) || {};
+            reportReviewMeta.delete(i.message.id);
             reportReviewLinks.delete(i.message.id);
-            const nowStr = new Date().toLocaleDateString("ru-RU") + " " + new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
-
-            if (portfolioChannel) {
-                const portfolioEmbed = new EmbedBuilder()
-                    .setTitle("🎬 Откат • ✅ Принят")
-                    .setDescription(
-                        `**Ссылка:** ${otkatLink ? `[Открыть откат](${otkatLink})` : "—"}\n` +
-                        `**Принял:** <@${i.user.id}>\n` +
-                        `**Дата:** ${nowStr}`
-                    )
-                    .setColor("Green")
-                    .setTimestamp();
-                await portfolioChannel.send({ embeds: [portfolioEmbed] }).catch(() => null);
-            }
+            await sendPortfolioReportStatus(i.guild, userId, {
+                status: "Принят",
+                type: "Откат",
+                details: `**Ссылка:** ${otkatMeta.evidenceUrl || "—"}\n**Принял:** <@${i.user.id}>`,
+                evidenceUrl: otkatMeta.evidenceUrl || null
+            });
             return;
         }
 
@@ -3593,6 +3634,15 @@ Main состав — основа нашей семьи. Здесь играю�
                 color: 0xE74C3C
             });
             await i.update({ components: [rejectContainer], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } });
+            const rejectMeta = reportReviewMeta.get(i.message.id) || {};
+            reportReviewMeta.delete(i.message.id);
+            reportReviewLinks.delete(i.message.id);
+            await sendPortfolioReportStatus(i.guild, userId, {
+                status: "Отклонён",
+                type: "Откат",
+                details: `**Отклонил:** <@${i.user.id}>`,
+                evidenceUrl: rejectMeta.evidenceUrl || null
+            });
 
             const notifChannel = await client.channels.fetch(MP_REJECTED_CHANNEL).catch(() => null);
             if (notifChannel) {
@@ -5015,7 +5065,7 @@ function personalReportChannelName(member) {
         .replace(/-+/g, "-")
         .replace(/^-|-$/g, "")
         .slice(0, 70) || "user";
-    return `личный-${rawName}-${member.id.slice(-5)}`;
+    return rawName;
 }
 
 async function findPersonalReportChannel(guild, userId, refresh = false) {
@@ -5069,6 +5119,9 @@ async function ensurePersonalReportChannel(member) {
         }
     } else {
         // Если участнику повторно выдали роль, возвращаем ему доступ к его каналу.
+        if (channel.name !== personalReportChannelName(member)) {
+            await channel.setName(personalReportChannelName(member)).catch(() => null);
+        }
         await channel.permissionOverwrites.edit(member.id, {
             ViewChannel: true,
             SendMessages: true,
