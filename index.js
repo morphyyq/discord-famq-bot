@@ -1096,6 +1096,13 @@ client.once(Events.ClientReady, async () => {
         new SlashCommandBuilder()
             .setName("add_role_all_stop")
             .setDescription("Остановить массовую выдачу роли")
+            .setDefaultMemberPermissions(0),
+        new SlashCommandBuilder()
+            .setName("plus")
+            .setDescription("Создать сбор плюсов на капт")
+            .addStringOption(opt => opt.setName("name").setDescription("Название капта").setRequired(true))
+            .addStringOption(opt => opt.setName("date").setDescription("Дата и время сбора").setRequired(true))
+            .addIntegerOption(opt => opt.setName("slots").setDescription("Количество слотов").setRequired(true).setMinValue(1).setMaxValue(500))
             .setDefaultMemberPermissions(0)
     ].map(cmd => cmd.toJSON());
 
@@ -1649,6 +1656,56 @@ client.on(Events.ChannelDelete, async (channel) => {
 });
 
 // =====================================================
+// PLUS SYSTEM — сбор плюсов на капт
+// =====================================================
+const plusEvents = new Map();
+
+function plusTotalSlots(event) {
+    return [...event.participants.values()].reduce((total, participant) => total + 1 + participant.extraSlots, 0);
+}
+
+function buildPlusContainer(event) {
+    const occupied = plusTotalSlots(event);
+    const participantEntries = [...event.participants.values()];
+    const participantsText = participantEntries.length
+        ? participantEntries.map((participant, index) => `${index + 1}. <@${participant.userId}>`).join("\n")
+        : "*Пока никто не присоединился.*";
+    const extraEntries = participantEntries.filter(participant => participant.extraSlots > 0);
+    const extraSlotsText = extraEntries.length
+        ? extraEntries.map((participant, index) => `${index + 1}. <@${participant.userId}> — **${participant.extraSlots}**`).join("\n")
+        : "*Дополнительных слотов нет.*";
+
+    const container = new ContainerBuilder()
+        .setAccentColor(0x2B2D31)
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(`## ⚔️ Сбор плюсов — ${clipLogText(event.name, 120)}`))
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(
+            `**Дата:** ${clipLogText(event.date, 120)}\n` +
+            `**Слоты:** **${occupied} / ${event.slots}**\n` +
+            `**Участников:** **${participantEntries.length}**`
+        ))
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(`### 👥 Участники\n${participantsText}`))
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(`### ➕ Дополнительные слоты\n${extraSlotsText}`))
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addActionRowComponents(new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`plus_join_${event.id}`)
+                .setLabel("Присоединиться")
+                .setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder()
+                .setCustomId(`plus_leave_${event.id}`)
+                .setLabel("Покинуть")
+                .setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder()
+                .setCustomId(`plus_extra_${event.id}`)
+                .setLabel("Доп слот")
+                .setStyle(ButtonStyle.Secondary)
+        ));
+
+    return container;
+}
+
+// =====================================================
 // CLEANUP COMMANDS — очистка сообщений и ролей
 // =====================================================
 const cleanupJobs = new Map();
@@ -1959,6 +2016,38 @@ client.on(Events.InteractionCreate, async (i) => {
                     await i.editReply({ content: "❌ Не удалось очистить канал. Проверьте права Manage Messages и Read Message History." });
                 } finally {
                     finishCleanupJob(i.guild.id, "messages", job);
+                }
+                return;
+            }
+
+            if (i.commandName === "plus") {
+                const name = i.options.getString("name").trim();
+                const date = i.options.getString("date").trim();
+                const slots = i.options.getInteger("slots");
+                const eventId = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+                const event = {
+                    id: eventId,
+                    guildId: i.guild.id,
+                    channelId: i.channel.id,
+                    name,
+                    date,
+                    slots,
+                    createdBy: i.user.id,
+                    participants: new Map()
+                };
+                plusEvents.set(eventId, event);
+
+                try {
+                    const message = await i.channel.send({
+                        components: [buildPlusContainer(event)],
+                        flags: MessageFlags.IsComponentsV2
+                    });
+                    event.messageId = message.id;
+                    await i.reply({ content: `✅ Сбор плюсов создан: ${message.url}`, ephemeral: true });
+                } catch (error) {
+                    plusEvents.delete(eventId);
+                    console.error("[PLUS CREATE ERROR]", error);
+                    await i.reply({ content: "❌ Не удалось создать контейнер сбора плюсов.", ephemeral: true });
                 }
                 return;
             }
@@ -2279,7 +2368,7 @@ client.on(Events.InteractionCreate, async (i) => {
                 if (!config || !config.CHANNELS || !config.CHANNELS.PANEL) return;
                 const channel = await client.channels.fetch(config.CHANNELS.PANEL);
 
-                const PANEL_BANNER_URL = "https://cdn.discordapp.com/attachments/1540014036081446922/1540278311345848351/ChatGPT_Image_21_._2026_._11_35_24.png?ex=6a895f76&is=6a880df6&hm=278200da43f975e56d4c0af527aeeff1062df74d3444701edf46290b6fbfc720&?ex=6a895d9f&is=6a880c1f&hm=7cafd4222d532fd76d38b4857953fdd117be245156b39db4d58275060f67424f&";
+                const PANEL_BANNER_URL = "https://cdn.discordapp.com/attachments/1540014036081446922/1540278311345848351/ChatGPT_Image_21_._2026_._11_35_24.png?ex=6a895f76&is=6a880df6&hm=278200da43f975e56d4c0af527aeeff1062df74d3444701edf46290b6fbfc720&";
 
                 const panelContainer = {
                     components: [
@@ -4168,6 +4257,55 @@ Main состав — основа нашей семьи. Здесь играю�
         }
 
         if (!config) return;
+
+        if (i.isButton() && i.customId.startsWith("plus_")) {
+            const [, action, eventId] = i.customId.split("_");
+            const event = plusEvents.get(eventId);
+            if (!event || event.guildId !== i.guild.id) {
+                await i.reply({ content: "❌ Этот сбор плюсов больше не найден или бот был перезапущен.", ephemeral: true });
+                return;
+            }
+
+            const userId = i.user.id;
+            const current = event.participants.get(userId);
+            const occupied = plusTotalSlots(event);
+
+            if (action === "join") {
+                if (current) {
+                    await i.reply({ content: "ℹ️ Вы уже присоединились к этому сбору.", ephemeral: true });
+                    return;
+                }
+                if (occupied >= event.slots) {
+                    await i.reply({ content: "❌ Все слоты уже заняты.", ephemeral: true });
+                    return;
+                }
+                event.participants.set(userId, { userId, extraSlots: 0 });
+            } else if (action === "leave") {
+                if (!current) {
+                    await i.reply({ content: "ℹ️ Вы ещё не присоединились к этому сбору.", ephemeral: true });
+                    return;
+                }
+                event.participants.delete(userId);
+            } else if (action === "extra") {
+                if (!current) {
+                    await i.reply({ content: "❌ Сначала нажмите «Присоединиться».", ephemeral: true });
+                    return;
+                }
+                if (occupied >= event.slots) {
+                    await i.reply({ content: "❌ Свободных слотов больше нет.", ephemeral: true });
+                    return;
+                }
+                current.extraSlots++;
+            } else {
+                return;
+            }
+
+            await i.update({
+                components: [buildPlusContainer(event)],
+                flags: MessageFlags.IsComponentsV2
+            });
+            return;
+        }
 
         if (i.isButton() && i.customId === "open_main_modal") {
             const type = "main";
