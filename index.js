@@ -1346,8 +1346,19 @@ async function deleteRpMenu(userId) {
 }
 
 async function sendPortfolioReportStatus(guild, userId, { status, type, details, evidenceUrl = null }) {
-    const portfolioChannel = guild.channels.cache.find(channel => channel.topic === `portfolio_${userId}`);
-    if (!portfolioChannel) return;
+    await guild.channels.fetch().catch(() => null);
+    const member = await guild.members.fetch(userId).catch(() => null);
+    const username = member?.user?.username?.toLowerCase().replace(/[^a-z0-9]/g, "") || null;
+    const portfolioCategoryId = SERVERS[guild.id]?.CHANNELS?.PORTFOLIO_CATEGORY;
+    const portfolioChannel = guild.channels.cache.find(channel =>
+        channel.topic === `portfolio_${userId}` ||
+        (portfolioCategoryId && channel.parentId === portfolioCategoryId && channel.permissionOverwrites?.cache?.has(userId)) ||
+        (username && channel.name === username && (!portfolioCategoryId || channel.parentId === portfolioCategoryId))
+    );
+    if (!portfolioChannel) {
+        console.warn(`[PORTFOLIO REPORT] Канал портфеля не найден для ${userId}`);
+        return;
+    }
 
     const colors = {
         "Принят": 0x2ECC71,
