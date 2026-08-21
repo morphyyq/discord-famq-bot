@@ -1405,7 +1405,10 @@ client.on(Events.MessageCreate, async (msg) => {
         // =====================================================
         const awaitRpKey = `rp_await_${msg.author.id}`;
         if (applications.has(awaitRpKey)) {
-            const att = msg.attachments.filter(a => a.contentType?.startsWith("image")).first();
+            const att = msg.attachments.find(a =>
+                a.contentType?.startsWith("image") ||
+                /\.(png|jpe?g|gif|webp)(?:\?|$)/i.test(a.name || a.url || "")
+            ) || msg.attachments.first();
             const evidenceLink = msg.content?.match(/https?:\/\/\S+/i)?.[0] || null;
             if (!att && !evidenceLink) return; // принимаем фото или ссылку
 
@@ -1457,7 +1460,10 @@ client.on(Events.MessageCreate, async (msg) => {
 
         const awaitKey = `mp_await_${msg.author.id}`;
         if (applications.has(awaitKey)) {
-            const att = msg.attachments.filter(a => a.contentType?.startsWith("image")).first();
+            const att = msg.attachments.find(a =>
+                a.contentType?.startsWith("image") ||
+                /\.(png|jpe?g|gif|webp)(?:\?|$)/i.test(a.name || a.url || "")
+            ) || msg.attachments.first();
             const evidenceLink = msg.content?.match(/https?:\/\/\S+/i)?.[0] || null;
             if (!att && !evidenceLink) return; // принимаем фото или ссылку
 
@@ -1511,7 +1517,10 @@ client.on(Events.MessageCreate, async (msg) => {
         }
 
         if (msg.channel.name?.startsWith("closed-")) {
-            const att = msg.attachments.filter(a => a.contentType?.startsWith("image")).first();
+            const att = msg.attachments.find(a =>
+                a.contentType?.startsWith("image") ||
+                /\.(png|jpe?g|gif|webp)(?:\?|$)/i.test(a.name || a.url || "")
+            ) || msg.attachments.first();
             if (!att) return;
 
             const hasPermission = config.ALLOWED_ROLES && config.ALLOWED_ROLES.some(role => msg.member.roles.cache.has(role));
@@ -1566,7 +1575,10 @@ client.on(Events.MessageCreate, async (msg) => {
             processed.add(msg.id);
             setTimeout(() => { processed.delete(msg.id); }, 120000);
 
-            const att = msg.attachments.filter(a => a.contentType?.startsWith("image")).first();
+            const att = msg.attachments.find(a =>
+                a.contentType?.startsWith("image") ||
+                /\.(png|jpe?g|gif|webp)(?:\?|$)/i.test(a.name || a.url || "")
+            ) || msg.attachments.first();
             if (!att) return;
 
             const audit = await client.channels.fetch(config.CHANNELS.AUDIT);
