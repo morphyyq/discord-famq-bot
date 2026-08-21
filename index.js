@@ -1769,7 +1769,10 @@ async function clearRolesFromAllHumanMembers(guild, job) {
 
         // Нельзя снимать @everyone, managed-роли и роли выше бота.
         const removableRoles = member.roles.cache.filter(role =>
-            role.id !== guild.id && !role.managed && role.editable
+            role.id !== guild.id &&
+            role.id !== MASS_ASSIGN_ROLE_ID &&
+            !role.managed &&
+            role.editable
         );
         if (!removableRoles.size) {
             skippedMembers++;
