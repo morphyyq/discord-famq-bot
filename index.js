@@ -2622,27 +2622,21 @@ Main состав — основа нашей семьи. Здесь играю�
                 const row = new ActionRowBuilder().addComponents(
                     new ButtonBuilder()
                         .setCustomId("open_recruit_modal")
-                        .setLabel("Подать заявку")
-                        .setStyle(ButtonStyle.Secondary)
+                        .setLabel("Открыть заявку")
+                        .setStyle(ButtonStyle.Primary)
                 );
 
                 const recruitPanelContainer = new ContainerBuilder()
-                    .setAccentColor(0x2B2D31)
-                    .addTextDisplayComponents(new TextDisplayBuilder().setContent("## Заявки в отдел Recruit | Darkness"))
+                    .setAccentColor(0xD1D5DB)
+                    .addTextDisplayComponents(new TextDisplayBuilder().setContent(
+`## Recruit
+-# Darkness Family · набор в отдел`
+                    ))
                     .addSeparatorComponents(new SeparatorBuilder())
                     .addTextDisplayComponents(new TextDisplayBuilder().setContent(
-`**Recruit — отдел, который отвечает за набор новых игроков и развитие семьи.**
-• Поиск новых участников.
-• Помощь новичкам.
-• Продвижение семьи.
-• Поддержание актива.
+`Отдел Recruit отвечает за набор и адаптацию новых участников.
 
-### Важно ###
-• Заявки оформляйте адекватно.
-• Рассмотрение заявки занимает до 4 дней.
-• Спам администрации запрещён.
-
-🚀 **Recruit — будущее семьи Darkness.**`
+Заполните короткую анкету честно и по делу. Рассмотрение занимает до **4 дней**.`
                     ))
                     .addSeparatorComponents(new SeparatorBuilder())
                     .addActionRowComponents(row);
