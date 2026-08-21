@@ -1065,6 +1065,21 @@ client.once(Events.ClientReady, async () => {
         new SlashCommandBuilder()
             .setName("shop_panel")
             .setDescription("Отправить панель семейного магазина баллов")
+            .setDefaultMemberPermissions(0),
+
+        new SlashCommandBuilder()
+            .setName("clear_roles")
+            .setDescription("Снять обычные роли со всех участников-людей")
+            .setDefaultMemberPermissions(0),
+
+        new SlashCommandBuilder()
+            .setName("clear")
+            .setDescription("Удалить сообщения в текущем канале")
+            .addStringOption(opt =>
+                opt.setName("amount")
+                    .setDescription("Количество сообщений или all для полной очистки")
+                    .setRequired(true)
+            )
             .setDefaultMemberPermissions(0)
     ].map(cmd => cmd.toJSON());
 
@@ -1618,6 +1633,115 @@ client.on(Events.ChannelDelete, async (channel) => {
 });
 
 // =====================================================
+// CLEANUP COMMANDS — очистка сообщений и ролей
+// =====================================================
+async function clearChannelMessages(channel, requestedAmount) {
+    const unlimited = requestedAmount === "all";
+    const target = unlimited ? Infinity : requestedAmount;
+    const maxPasses = unlimited ? 500 : Math.ceil(target / 100) + 2;
+    const fourteenDays = 14 * 24 * 60 * 60 * 1000;
+
+    let deleted = 0;
+    let failed = 0;
+
+    for (let pass = 0; pass < maxPasses && deleted < target; pass++) {
+        const batch = await channel.messages.fetch({ limit: 100 }).catch(() => null);
+        if (!batch || batch.size === 0) break;
+
+        const remaining = unlimited ? 100 : Math.min(100, target - deleted);
+        const selected = batch.first(remaining);
+        if (!selected.length) break;
+
+        const recent = selected.filter(message => Date.now() - message.createdTimestamp < fourteenDays);
+        const old = selected.filter(message => Date.now() - message.createdTimestamp >= fourteenDays);
+        let progress = 0;
+
+        if (recent.length > 1) {
+            try {
+                const result = await channel.bulkDelete(recent.map(message => message.id), true);
+                const count = result?.size || 0;
+                deleted += count;
+                progress += count;
+            } catch {
+                // Если массовое удаление недоступно, пробуем удалить сообщения по одному.
+                for (const message of recent) {
+                    try {
+                        await message.delete();
+                        deleted++;
+                        progress++;
+                    } catch {
+                        failed++;
+                    }
+                    if (deleted >= target) break;
+                }
+            }
+        } else if (recent.length === 1 && deleted < target) {
+            try {
+                await recent[0].delete();
+                deleted++;
+                progress++;
+            } catch {
+                failed++;
+            }
+        }
+
+        for (const message of old) {
+            if (deleted >= target) break;
+            try {
+                // Старше 14 дней Discord не удаляет bulkDelete — удаляем отдельно.
+                await message.delete();
+                deleted++;
+                progress++;
+            } catch {
+                failed++;
+            }
+        }
+
+        if (progress === 0) break;
+        if (!unlimited && deleted >= target) break;
+    }
+
+    return { deleted, failed };
+}
+
+async function clearRolesFromAllHumanMembers(guild) {
+    await guild.members.fetch();
+
+    let processedMembers = 0;
+    let removedRoles = 0;
+    let skippedMembers = 0;
+    let failedMembers = 0;
+
+    for (const member of guild.members.cache.values()) {
+        // Защита от случайного отключения самого бота, ботов и владельца сервера.
+        if (member.user.bot || member.id === guild.ownerId) {
+            skippedMembers++;
+            continue;
+        }
+
+        // Нельзя снимать @everyone, managed-роли и роли выше бота.
+        const removableRoles = member.roles.cache.filter(role =>
+            role.id !== guild.id && !role.managed && role.editable
+        );
+        if (!removableRoles.size) {
+            skippedMembers++;
+            continue;
+        }
+
+        try {
+            await member.roles.remove([...removableRoles.keys()]);
+            processedMembers++;
+            removedRoles += removableRoles.size;
+        } catch {
+            failedMembers++;
+        }
+    }
+
+    return { processedMembers, removedRoles, skippedMembers, failedMembers };
+}
+
+
+// =====================================================
 // INTERACTIONS & SLASH COMMANDS
 // =====================================================
 client.on(Events.InteractionCreate, async (i) => {
@@ -1634,6 +1758,52 @@ client.on(Events.InteractionCreate, async (i) => {
                     await i.reply({ content: "❌ Вы не имеете доступа к управлению этой командой.", ephemeral: true });
                     return;
                 }
+            }
+
+            if (i.commandName === "clear_roles") {
+                await i.deferReply({ ephemeral: true });
+                try {
+                    const result = await clearRolesFromAllHumanMembers(i.guild);
+                    await i.editReply({
+                        content: `✅ Очистка ролей завершена.\n` +
+                            `Участников обработано: **${result.processedMembers}**\n` +
+                            `Ролей снято: **${result.removedRoles}**\n` +
+                            `Пропущено: **${result.skippedMembers}**\n` +
+                            `Ошибок: **${result.failedMembers}**`
+                    });
+                } catch (error) {
+                    console.error("[CLEAR ROLES ERROR]", error);
+                    await i.editReply({ content: "❌ Не удалось выполнить массовое снятие ролей. Проверьте права и иерархию ролей бота." });
+                }
+                return;
+            }
+
+            if (i.commandName === "clear") {
+                const rawAmount = i.options.getString("amount")?.trim().toLowerCase();
+                const isAll = rawAmount === "all";
+                const amount = Number.parseInt(rawAmount, 10);
+
+                if (!isAll && (!Number.isInteger(amount) || amount < 1 || amount > 10000)) {
+                    await i.reply({ content: "❌ Укажите число от **1** до **10000** или значение **all**.", ephemeral: true });
+                    return;
+                }
+                if (!i.channel?.messages) {
+                    await i.reply({ content: "❌ В этом канале нельзя удалять сообщения.", ephemeral: true });
+                    return;
+                }
+
+                await i.deferReply({ ephemeral: true });
+                try {
+                    const result = await clearChannelMessages(i.channel, isAll ? "all" : amount);
+                    await i.editReply({
+                        content: `✅ Удалено сообщений: **${result.deleted}**.` +
+                            (result.failed ? ` Не удалось удалить: **${result.failed}**.` : "")
+                    });
+                } catch (error) {
+                    console.error("[CLEAR MESSAGES ERROR]", error);
+                    await i.editReply({ content: "❌ Не удалось очистить канал. Проверьте права Manage Messages и Read Message History." });
+                }
+                return;
             }
 
             if (i.commandName === "all") {
