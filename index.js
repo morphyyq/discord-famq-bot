@@ -1661,18 +1661,18 @@ client.on(Events.ChannelDelete, async (channel) => {
 const plusEvents = new Map();
 
 function plusTotalSlots(event) {
-    return [...event.participants.values()].reduce((total, participant) => total + 1 + participant.extraSlots, 0);
+    return event.participants.size + event.extraParticipants.size;
 }
 
 function buildPlusContainer(event) {
     const occupied = plusTotalSlots(event);
     const participantEntries = [...event.participants.values()];
+    const extraEntries = [...event.extraParticipants.values()];
     const participantsText = participantEntries.length
         ? participantEntries.map((participant, index) => `${index + 1}. <@${participant.userId}>`).join("\n")
         : "*Пока никто не присоединился.*";
-    const extraEntries = participantEntries.filter(participant => participant.extraSlots > 0);
     const extraSlotsText = extraEntries.length
-        ? extraEntries.map((participant, index) => `${index + 1}. <@${participant.userId}> — **${participant.extraSlots}**`).join("\n")
+        ? extraEntries.map((participant, index) => `${index + 1}. <@${participant.userId}>`).join("\n")
         : "*Дополнительных слотов нет.*";
 
     const container = new ContainerBuilder()
@@ -1680,8 +1680,10 @@ function buildPlusContainer(event) {
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(`## ⚔️ Сбор плюсов — ${clipLogText(event.name, 120)}`))
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(
             `**Дата:** ${clipLogText(event.date, 120)}\n` +
-            `**Слоты:** **${occupied} / ${event.slots}**\n` +
-            `**Участников:** **${participantEntries.length}**`
+            `**Слоты всего:** **${occupied} / ${event.slots}**\n` +
+            `**Обычные слоты:** **${participantEntries.length}**\n` +
+            `**Доп. слоты:** **${extraEntries.length}**\n` +
+            `**Участников всего:** **${participantEntries.length + extraEntries.length}**`
         ))
         .addSeparatorComponents(new SeparatorBuilder())
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(`### 👥 Участники\n${participantsText}`))
@@ -2033,7 +2035,8 @@ client.on(Events.InteractionCreate, async (i) => {
                     date,
                     slots,
                     createdBy: i.user.id,
-                    participants: new Map()
+                    participants: new Map(),
+                    extraParticipants: new Map()
                 };
                 plusEvents.set(eventId, event);
 
@@ -4267,35 +4270,49 @@ Main состав — основа нашей семьи. Здесь играю�
             }
 
             const userId = i.user.id;
-            const current = event.participants.get(userId);
+            const inRegular = event.participants.has(userId);
+            const inExtra = event.extraParticipants.has(userId);
             const occupied = plusTotalSlots(event);
 
             if (action === "join") {
-                if (current) {
-                    await i.reply({ content: "ℹ️ Вы уже присоединились к этому сбору.", ephemeral: true });
+                if (inRegular) {
+                    await i.reply({ content: "ℹ️ Вы уже находитесь в обычных слотах.", ephemeral: true });
                     return;
                 }
-                if (occupied >= event.slots) {
-                    await i.reply({ content: "❌ Все слоты уже заняты.", ephemeral: true });
-                    return;
+                if (inExtra) {
+                    // Перемещение из дополнительных слотов в обычные.
+                    event.extraParticipants.delete(userId);
+                    event.participants.set(userId, { userId });
+                } else {
+                    if (occupied >= event.slots) {
+                        await i.reply({ content: "❌ Все слоты уже заняты.", ephemeral: true });
+                        return;
+                    }
+                    event.participants.set(userId, { userId });
                 }
-                event.participants.set(userId, { userId, extraSlots: 0 });
             } else if (action === "leave") {
-                if (!current) {
+                if (!inRegular && !inExtra) {
                     await i.reply({ content: "ℹ️ Вы ещё не присоединились к этому сбору.", ephemeral: true });
                     return;
                 }
                 event.participants.delete(userId);
+                event.extraParticipants.delete(userId);
             } else if (action === "extra") {
-                if (!current) {
-                    await i.reply({ content: "❌ Сначала нажмите «Присоединиться».", ephemeral: true });
+                if (inExtra) {
+                    await i.reply({ content: "ℹ️ Вы уже находитесь в дополнительных слотах.", ephemeral: true });
                     return;
                 }
-                if (occupied >= event.slots) {
-                    await i.reply({ content: "❌ Свободных слотов больше нет.", ephemeral: true });
-                    return;
+                if (inRegular) {
+                    // Перемещение из обычных слотов в дополнительные без увеличения общего счётчика.
+                    event.participants.delete(userId);
+                    event.extraParticipants.set(userId, { userId });
+                } else {
+                    if (occupied >= event.slots) {
+                        await i.reply({ content: "❌ Свободных слотов больше нет.", ephemeral: true });
+                        return;
+                    }
+                    event.extraParticipants.set(userId, { userId });
                 }
-                current.extraSlots++;
             } else {
                 return;
             }
