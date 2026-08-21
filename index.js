@@ -1310,13 +1310,27 @@ async function downloadReportImage(url, fileName) {
     }
 }
 
-function buildReportReviewContainer({ userId, title, details, color = 0x3498DB, evidenceUrl = null, buttons = null }) {
+function buildReportReviewContainer({ userId, title, details, color = 0x3498DB, evidenceUrl = null, attachmentName = null, buttons = null }) {
     const container = new ContainerBuilder()
         .setAccentColor(color)
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(`## ${title}`))
         .addSeparatorComponents(new SeparatorBuilder())
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(details));
 
+    // Картинку вставляем в тот же контейнер: файл летит вложением этого же сообщения.
+    const galleryUrl = attachmentName
+        ? `attachment://${attachmentName}`
+        : (evidenceUrl && /\.(png|jpe?g|gif|webp)(?:\?|$)/i.test(evidenceUrl) ? evidenceUrl : null);
+
+    if (galleryUrl) {
+        container
+            .addSeparatorComponents(new SeparatorBuilder())
+            .addMediaGalleryComponents(
+                new MediaGalleryBuilder().addItems(
+                    new MediaGalleryItemBuilder().setURL(galleryUrl)
+                )
+            );
+    }
 
     if (buttons) container.addActionRowComponents(buttons);
     return container;
@@ -1344,24 +1358,28 @@ async function sendPortfolioReportStatus(guild, userId, { status, type, details,
         "Принят": 0x2ECC71,
         "Отклонён": 0xE74C3C
     };
+    const evidenceFileName = "evidence.png";
+    const evidenceFile = evidenceUrl && /\.(png|jpe?g|gif|webp)(?:\?|$)/i.test(evidenceUrl)
+        ? await downloadReportImage(evidenceUrl, evidenceFileName)
+        : null;
+
     const container = buildReportReviewContainer({
         userId,
         title: `<@${userId}>`,
         details: `**Статус:** ${status}\n**Тип:** ${type}\n${details}${evidenceUrl ? `\n**Доказательство:** ${evidenceUrl}` : ""}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
         color: colors[status] || 0x2B2D31,
-        evidenceUrl
+        evidenceUrl,
+        attachmentName: evidenceFile ? evidenceFileName : null
     });
 
-    await portfolioChannel.send({
+    const payload = {
         components: [container],
         flags: MessageFlags.IsComponentsV2,
         allowedMentions: { parse: [] }
-    }).catch(error => console.error("[PORTFOLIO REPORT ERROR]", error));
+    };
+    if (evidenceFile) payload.files = [evidenceFile];
 
-    if (evidenceUrl && /\.(png|jpe?g|gif|webp)(?:\?|$)/i.test(evidenceUrl)) {
-        const file = await downloadReportImage(evidenceUrl, "evidence.png");
-        if (file) await portfolioChannel.send({ files: [file] }).catch(() => null);
-    }
+    await portfolioChannel.send(payload).catch(error => console.error("[PORTFOLIO REPORT ERROR]", error));
 }
 
 client.on(Events.MessageCreate, async (msg) => {
@@ -1422,11 +1440,12 @@ client.on(Events.MessageCreate, async (msg) => {
                 details: `**Статус:** На проверке\n**Тип:** ${rpData.label}\n**Название:** ${rpName}\n**Баллов при одобрении:** +${rpData.points}\n**Доказательство:** ${evidenceLink || "прикреплено изображением"}`,
                 color: 0x3498DB,
                 evidenceUrl,
+                attachmentName: file ? fileName : null,
                 buttons: row
             });
             const payload = { components: [container], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
+            if (file) payload.files = [file];
             const reviewMessage = await reviewChannel.send(payload);
-            if (file) await reviewChannel.send({ files: [file] }).catch(() => null);
             if (reviewMessage) reportReviewMeta.set(reviewMessage.id, { evidenceUrl: att?.url || evidenceLink, type: rpData.label });
             setTimeout(() => msg.delete().catch(() => null), 8000);
             return;
@@ -1473,11 +1492,12 @@ client.on(Events.MessageCreate, async (msg) => {
                 details: `**Статус:** На проверке\n**Тип:** МП отчёт\n**МПшка:** ${mpData.mpType}\n**Результат:** ${mpData.result === "win" ? "Win" : "Lose"}\n**Баллов к начислению:** +${mpData.points}\n**Доказательство:** ${evidenceLink || "прикреплено изображением"}`,
                 color: mpData.result === "win" ? 0x3498DB : 0xF39C12,
                 evidenceUrl,
+                attachmentName: file ? fileName : null,
                 buttons: row
             });
             const payload = { components: [container], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
+            if (file) payload.files = [file];
             const reviewMessage = await reviewChannel.send(payload);
-            if (file) await reviewChannel.send({ files: [file] }).catch(() => null);
             if (reviewMessage) reportReviewMeta.set(reviewMessage.id, { evidenceUrl: att?.url || evidenceLink, type: "МП отчёт" });
             setTimeout(() => msg.delete().catch(() => null), 8000);
             return;
@@ -3030,6 +3050,7 @@ Main состав — основа нашей семьи. Здесь играю�
             // Получаем url картинки из embed
             const reviewMeta = reportReviewMeta.get(i.message.id) || {};
             const imgUrl = i.message.attachments?.first()?.url || reviewMeta.evidenceUrl || null;
+            const imgName = i.message.attachments?.first()?.name || null;
 
             salary.mpHistory[userId].push({
                 mp: mpType, result, points,
@@ -3044,7 +3065,8 @@ Main состав — основа нашей семьи. Здесь играю�
                 title: `<@${userId}>`,
                 details: `**Статус:** ✅ МП отчёт принят\n**МПшка:** ${mpType}\n**Результат:** ${result === "win" ? "Win" : "Lose"}\n**Баллов начислено:** +${points}\n**Принял:** <@${i.user.id}>`,
                 color: 0x2ECC71,
-                evidenceUrl: imgUrl
+                evidenceUrl: imgUrl,
+                attachmentName: imgName
             });
             await i.update({ components: [acceptContainer], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } });
             reportReviewMeta.delete(i.message.id);
@@ -3396,6 +3418,7 @@ Main состав — основа нашей семьи. Здесь играю�
             const reportNum = salary.mpHistory[userId].length + 1;
             const reviewMeta = reportReviewMeta.get(i.message.id) || {};
             const imgUrl = i.message.attachments?.first()?.url || reviewMeta.evidenceUrl || null;
+            const imgName = i.message.attachments?.first()?.name || null;
             salary.mpHistory[userId].push({
                 mp: rpName, result: "win", points,
                 ts: Math.floor(Date.now() / 1000),
@@ -3408,7 +3431,8 @@ Main состав — основа нашей семьи. Здесь играю�
                 title: `<@${userId}>`,
                 details: `**Статус:** ✅ ${label} одобрен\n**Принятый отчёт №:** ${reportNum}\n**Название:** ${rpName}\n**Начислено:** +${points}\n**Одобрил:** <@${i.user.id}>`,
                 color: 0x2ECC71,
-                evidenceUrl: imgUrl
+                evidenceUrl: imgUrl,
+                attachmentName: imgName
             });
             await i.update({ components: [acceptContainer], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } });
 
