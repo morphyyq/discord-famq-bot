@@ -2773,7 +2773,7 @@ Main состав — основа нашей семьи. Здесь играю�
             if (i.commandName === "interaction_panel") {
                 await i.deferReply({ ephemeral: true });
 
-                const BANNER_URL = "https://media.discordapp.net/attachments/1506711652483993686/1521264946141204492/f5055a77-4fcc-4d96-933d-957554146e3d.png?ex=6a4433e2&is=6a42e262&hm=ecad7c0c727c7c217eb8b7d89fda3965e15a311b9d9655b113e7717a0c1c8861&=&format=webp&quality=lossless&width=495&height=165";
+                const BANNER_URL = "https://cdn.discordapp.com/attachments/1540014036081446922/1540283283227541625/ChatGPT_Image_21_._2026_._11_55_37.png?ex=6a896417&is=6a881297&hm=63ab8d52865c69d26e030f42afef6bf11c16404f12aa3a8ad79f6f84e4e2a768&";
 
                 const containerMessage = {
                     components: [
@@ -2797,7 +2797,7 @@ Main состав — основа нашей семьи. Здесь играю�
                                 },
                                 {
                                     type: 10, // Text Display — серая линия через markdown цитату
-                                    content: "> 🏖️ **Отпуск** — взять долгосрочный отпуск, отдых от игры.\n> 📁 **Портфель** — создать портфель.\n> 🎬 **Откат** — открыть гайд по оформлению отката.\n> 📋 **РП отчёт** — информация по РП отчётам и скринам ГТ, разгон, грин."
+                                    content: "> 🏖️ **Отпуск** — взять долгосрочный отпуск, отдых от игры.\n> 🎬 **Откат** — открыть гайд по оформлению отката.\n> 📋 **РП отчёт** — информация по РП отчётам и скринам ГТ, разгон, грин."
                                 },
                                 {
                                     type: 1, // Action Row
@@ -2808,13 +2808,6 @@ Main состав — основа нашей семьи. Здесь играю�
                                             label: "Отпуск",
                                             custom_id: "interaction_vacation",
                                             emoji: { name: "🏖️" }
-                                        },
-                                        {
-                                            type: 2,
-                                            style: 2,
-                                            label: "Портфель",
-                                            custom_id: "interaction_portfolio",
-                                            emoji: { name: "📁" }
                                         },
                                         {
                                             type: 2,
