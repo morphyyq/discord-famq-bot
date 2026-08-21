@@ -299,6 +299,46 @@ function buildAppBodyText(type, data) {
     return fields.join("\n\n");
 }
 
+function buildDirectApplicationAuditContainer({ status, data, type, targetId, username, channelId, actorId = null, reason = null }) {
+    const statusConfig = {
+        "Подана": { title: "📥 Заявка подана", color: 0x3498DB },
+        "Рассмотрена": { title: "⏳ Заявка рассматривается", color: 0xF1C40F },
+        "Принята": { title: "✅ Заявка принята", color: 0x2ECC71 },
+        "Отказана": { title: "❌ Заявка отклонена", color: 0xE74C3C }
+    }[status] || { title: "📋 Изменение заявки", color: 0x2B2D31 };
+
+    const details = [
+        `**Статус:** ${status}`,
+        `**Тип заявки:** ${APP_TYPE_TITLES[type] || "Заявление"}`,
+        `**Пользователь:** <@${targetId}>`,
+        `**Username:** ${username || targetId}`,
+        `**ID:** \`${targetId}\``,
+        channelId ? `**Тикет:** <#${channelId}>` : "",
+        actorId ? `**Кто изменил статус:** <@${actorId}>` : "",
+        reason ? `**Причина отказа:** ${reason}` : ""
+    ].filter(Boolean);
+
+    return new ContainerBuilder()
+        .setAccentColor(statusConfig.color)
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(`## ${statusConfig.title}`))
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(details.join("\n")))
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(buildAppBodyText(type, data)));
+}
+
+async function sendDirectApplicationAudit(guild, channelId, payload) {
+    if (!guild || !channelId) return;
+    const channel = await guild.channels.fetch(channelId).catch(() => null);
+    if (!channel) return;
+
+    await channel.send({
+        components: [buildDirectApplicationAuditContainer(payload)],
+        flags: MessageFlags.IsComponentsV2,
+        allowedMentions: { parse: [] }
+    }).catch(() => null);
+}
+
 async function sendApplicationAudit(guild, { status, data, type, targetId, username, channelId, actorId = null, reason = null }) {
     const statusConfig = {
         "Подана": { title: "📥 Заявка подана", color: 0x3498DB },
@@ -2579,12 +2619,19 @@ Main состав — основа нашей семьи. Здесь играю�
                 if (!config || !config.CHANNELS || !config.CHANNELS.RECRUIT) return;
                 const channel = await client.channels.fetch(config.CHANNELS.RECRUIT);
 
-                const embed = new EmbedBuilder()
-                    .setColor("#2b2d31")
-                    .setDescription(
-`## Заявки в отдел Recruit | Darkness ##
+                const row = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder()
+                        .setCustomId("open_recruit_modal")
+                        .setLabel("Подать заявку")
+                        .setStyle(ButtonStyle.Secondary)
+                );
 
-**Recruit — отдел, который отвечает за набор новых игроков и развитие семьи.**
+                const recruitPanelContainer = new ContainerBuilder()
+                    .setAccentColor(0x2B2D31)
+                    .addTextDisplayComponents(new TextDisplayBuilder().setContent("## Заявки в отдел Recruit | Darkness"))
+                    .addSeparatorComponents(new SeparatorBuilder())
+                    .addTextDisplayComponents(new TextDisplayBuilder().setContent(
+`**Recruit — отдел, который отвечает за набор новых игроков и развитие семьи.**
 • Поиск новых участников.
 • Помощь новичкам.
 • Продвижение семьи.
@@ -2596,16 +2643,14 @@ Main состав — основа нашей семьи. Здесь играю�
 • Спам администрации запрещён.
 
 🚀 **Recruit — будущее семьи Darkness.**`
-                    );
+                    ))
+                    .addSeparatorComponents(new SeparatorBuilder())
+                    .addActionRowComponents(row);
 
-                const row = new ActionRowBuilder().addComponents(
-                    new ButtonBuilder()
-                        .setCustomId("open_recruit_modal")
-                        .setLabel("Подать заявку")
-                        .setStyle(ButtonStyle.Secondary)
-                );
-
-                await channel.send({ embeds: [embed], components: [row] });
+                await channel.send({
+                    components: [recruitPanelContainer],
+                    flags: MessageFlags.IsComponentsV2
+                });
                 await i.reply({ content: "✅ Панель заявки в Recruit успешно создана!", ephemeral: true });
                 return;
             }
@@ -4386,18 +4431,35 @@ Main состав — основа нашей семьи. Здесь играю�
                 const appData = applications.get(targetId);
                 const appType = appData?.type || appTypeFromChannelName(i.channel.name);
 
-                const rejectEmbed = new EmbedBuilder()
-                    .setTitle(`❌ Заявка отклонена | ${isMainCh ? "Main состав" : isRecruitCh ? "Recruit" : "Семья"}`)
-                    .setColor("Red")
-                    .setDescription(buildAppBodyText(appType, appData))
-                    .addFields(
-                        { name: "Кого", value: `<@${targetId}>`, inline: true },
-                        { name: "Отклонил", value: `<@${i.user.id}>`, inline: true },
-                        { name: "Причина", value: reason, inline: false }
-                    )
-                    .setTimestamp();
+                if (isRecruitCh) {
+                    await logChannel.send({
+                        components: [buildDirectApplicationAuditContainer({
+                            status: "Отказана",
+                            data: appData,
+                            type: appType,
+                            targetId,
+                            username: i.user.username,
+                            channelId: i.channel.id,
+                            actorId: i.user.id,
+                            reason
+                        })],
+                        flags: MessageFlags.IsComponentsV2,
+                        allowedMentions: { parse: [] }
+                    }).catch(() => null);
+                } else {
+                    const rejectEmbed = new EmbedBuilder()
+                        .setTitle(`❌ Заявка отклонена | ${isMainCh ? "Main состав" : "Семья"}`)
+                        .setColor("Red")
+                        .setDescription(buildAppBodyText(appType, appData))
+                        .addFields(
+                            { name: "Кого", value: `<@${targetId}>`, inline: true },
+                            { name: "Отклонил", value: `<@${i.user.id}>`, inline: true },
+                            { name: "Причина", value: reason, inline: false }
+                        )
+                        .setTimestamp();
 
-                await logChannel.send({ embeds: [rejectEmbed] }).catch(() => null);
+                    await logChannel.send({ embeds: [rejectEmbed] }).catch(() => null);
+                }
             }
 
             ticketReviewers.delete(i.channel.id);
@@ -4709,37 +4771,15 @@ ${data.q5}
                 channelId: recruitChannel.id
             });
 
-            // Аудит лог — новая заявка (recruit)
-            if (config.CHANNELS.AUDIT_RECRUIT) {
-                const auditCh = await i.guild.channels.fetch(config.CHANNELS.AUDIT_RECRUIT).catch(() => null);
-                if (auditCh) {
-                    const auditEmbed = new EmbedBuilder()
-                        .setTitle("Заявление — Recruit")
-                        .setColor("#2b2d31")
-                        .setDescription(
-`**НИК И СТАТИК**
-${recruitData.q1}
-
-**ИМЯ И ВОЗРАСТ (В РЕАЛЕ)**
-${recruitData.q2}
-
-**ПОЧЕМУ ХОТИТЕ ПОПАСТЬ В RECRUIT?**
-${recruitData.q3}
-
-**ОПЫТ В РЕКРУТИНГЕ / СХОЖИХ РОЛЯХ**
-${recruitData.q4}
-
-**Пользователь**
-<@${i.user.id}>`)
-                        .addFields(
-                            { name: "Username", value: i.user.username, inline: true },
-                            { name: "ID", value: i.user.id, inline: true },
-                            { name: "Тикет", value: `<#${recruitChannel.id}>`, inline: true }
-                        )
-                        .setTimestamp();
-                    await auditCh.send({ embeds: [auditEmbed] }).catch(() => null);
-                }
-            }
+            // Аудит Recruit — отдельный контейнер в канале AUDIT_RECRUIT.
+            await sendDirectApplicationAudit(i.guild, config.CHANNELS.AUDIT_RECRUIT, {
+                status: "Подана",
+                data: recruitData,
+                type: "recruit",
+                targetId: i.user.id,
+                username: i.user.username,
+                channelId: recruitChannel.id
+            });
 
             return;
         }
@@ -4951,16 +4991,32 @@ ${recruitData.q4}
                         const auditChannel = await i.guild.channels.fetch(auditChannelId).catch(() => null);
                         if (auditChannel) {
                             const auditLabel = isMain ? "Main состав" : isRecruit ? "Recruit" : "Семья";
-                            const auditEmbed = new EmbedBuilder()
-                                .setColor("Green")
-                                .setTitle(`✅ Заявка принята | ${auditLabel}`)
-                                .setDescription(buildAppBodyText(appType, appData))
-                                .addFields(
-                                    { name: "Кого", value: `<@${targetId}>`, inline: true },
-                                    { name: "Принял", value: `<@${i.user.id}>`, inline: true }
-                                )
-                                .setTimestamp();
-                            await auditChannel.send({ embeds: [auditEmbed] }).catch(() => null);
+                            if (isRecruit) {
+                                await auditChannel.send({
+                                    components: [buildDirectApplicationAuditContainer({
+                                        status: "Принята",
+                                        data: appData,
+                                        type: appType,
+                                        targetId,
+                                        username: appUsername,
+                                        channelId: i.channel.id,
+                                        actorId: i.user.id
+                                    })],
+                                    flags: MessageFlags.IsComponentsV2,
+                                    allowedMentions: { parse: [] }
+                                }).catch(() => null);
+                            } else {
+                                const auditEmbed = new EmbedBuilder()
+                                    .setColor("Green")
+                                    .setTitle(`✅ Заявка принята | ${auditLabel}`)
+                                    .setDescription(buildAppBodyText(appType, appData))
+                                    .addFields(
+                                        { name: "Кого", value: `<@${targetId}>`, inline: true },
+                                        { name: "Принял", value: `<@${i.user.id}>`, inline: true }
+                                    )
+                                    .setTimestamp();
+                                await auditChannel.send({ embeds: [auditEmbed] }).catch(() => null);
+                            }
                         }
                     }
 
@@ -5031,16 +5087,32 @@ ${recruitData.q4}
                     if (reviewAuditId) {
                         const auditChannel = await i.guild.channels.fetch(reviewAuditId).catch(() => null);
                         if (auditChannel) {
-                            const auditEmbed = new EmbedBuilder()
-                                .setColor("Yellow")
-                                .setTitle("⏳ Заявка на рассмотрении")
-                                .setDescription(buildAppBodyText(appType, appData))
-                                .addFields(
-                                    { name: "Кого", value: `<@${targetId}>`, inline: true },
-                                    { name: "Взял на рассмотрение", value: `<@${i.user.id}>`, inline: true }
-                                )
-                                .setTimestamp();
-                            await auditChannel.send({ embeds: [auditEmbed] }).catch(() => null);
+                            if (isRecruit) {
+                                await auditChannel.send({
+                                    components: [buildDirectApplicationAuditContainer({
+                                        status: "Рассмотрена",
+                                        data: appData,
+                                        type: appType,
+                                        targetId,
+                                        username: appUsername,
+                                        channelId: i.channel.id,
+                                        actorId: i.user.id
+                                    })],
+                                    flags: MessageFlags.IsComponentsV2,
+                                    allowedMentions: { parse: [] }
+                                }).catch(() => null);
+                            } else {
+                                const auditEmbed = new EmbedBuilder()
+                                    .setColor("Yellow")
+                                    .setTitle("⏳ Заявка на рассмотрении")
+                                    .setDescription(buildAppBodyText(appType, appData))
+                                    .addFields(
+                                        { name: "Кого", value: `<@${targetId}>`, inline: true },
+                                        { name: "Взял на рассмотрение", value: `<@${i.user.id}>`, inline: true }
+                                    )
+                                    .setTimestamp();
+                                await auditChannel.send({ embeds: [auditEmbed] }).catch(() => null);
+                            }
                         }
                     }
 
