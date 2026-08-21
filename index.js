@@ -969,6 +969,10 @@ client.on(Events.GuildMemberAdd, async (member) => {
             `**ID:** \`${member.id}\``,
             `**Аккаунт создан:** <t:${Math.floor(member.user.createdTimestamp / 1000)}:F>`
         ], { title: "📥 Пользователь зашёл", color: 0x2ECC71 });
+
+        if (member.roles.cache.has(PERSONAL_REPORT_ROLE_ID)) {
+            await ensurePersonalReportChannel(member);
+        }
     } catch (error) {
         console.error("[MEMBER ADD LOG ERROR]", error);
     }
@@ -1132,6 +1136,7 @@ client.once(Events.ClientReady, async () => {
         await updateOnlineMonitor();
         await updateAFKEmbed(mainGuild);
         await ensureAllLogThreads(mainGuild);
+        await initPersonalReportChannels(mainGuild);
         await initVoiceSessions(mainGuild);
     }
     setInterval(updateOnlineMonitor, 60000);
@@ -1198,6 +1203,7 @@ client.once(Events.ClientReady, async () => {
 // =====================================================
 client.on(Events.GuildMemberRemove, async (member) => {
     try {
+        await notifyPersonalReportRoleLost(member.guild, member.id, "leave");
         const kickEntry = await findRecentAuditEntry(member.guild, AuditLogEvent.MemberKick, member.id);
         const memberLogLines = [
             `**Участник:** <@${member.id}> (${clipLogText(member.user?.tag || member.displayName)})`,
@@ -1349,6 +1355,7 @@ client.on(Events.MessageCreate, async (msg) => {
             );
 
             await reviewChannel.send({ embeds: [embed], files: [file], components: [row] });
+            await sendRpReportToPersonalChannel(msg.guild, msg.author.id, rpData, att.url);
 
             // Удаляем сообщение игрока
             await msg.delete().catch(() => null);
@@ -4945,6 +4952,160 @@ ${recruitData.q4}
 // GUILD MEMBER UPDATE — вычет когда осталась только 1 роль
 // =====================================================
 const DEDUCT_ROLE_ID = "1458410670071615580";
+const PERSONAL_REPORT_ROLE_ID = "1458410756453306490";
+const PERSONAL_REPORT_CATEGORY_ID = "1540292539943485450";
+const PERSONAL_REPORT_HIGH_RANK_ROLE_ID = "1458484199735689299";
+const PERSONAL_REPORT_TOPIC_PREFIX = "darkness-personal-report:";
+
+function personalReportNoticePayload({ userId, title, message, color = 0xE74C3C, mentionHighRank = true }) {
+    const container = new ContainerBuilder()
+        .setAccentColor(color)
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(`## ${title}`))
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(message));
+
+    return {
+        components: [container],
+        flags: MessageFlags.IsComponentsV2,
+        allowedMentions: mentionHighRank
+            ? { roles: [PERSONAL_REPORT_HIGH_RANK_ROLE_ID] }
+            : { parse: [] }
+    };
+}
+
+function personalReportChannelName(member) {
+    const rawName = String(member.user?.username || member.displayName || "user")
+        .toLowerCase()
+        .replace(/[^a-z0-9а-яё_-]+/gi, "-")
+        .replace(/-+/g, "-")
+        .replace(/^-|-$/g, "")
+        .slice(0, 70) || "user";
+    return `личный-${rawName}-${member.id.slice(-5)}`;
+}
+
+async function findPersonalReportChannel(guild, userId, refresh = false) {
+    if (!guild || guild.id !== "1458190222042075251") return null;
+    if (refresh) await guild.channels.fetch().catch(() => null);
+    return guild.channels.cache.find(channel =>
+        channel.type === ChannelType.GuildText &&
+        channel.parentId === PERSONAL_REPORT_CATEGORY_ID &&
+        channel.topic === `${PERSONAL_REPORT_TOPIC_PREFIX}${userId}`
+    ) || null;
+}
+
+async function ensurePersonalReportChannel(member) {
+    const guild = member?.guild;
+    if (!guild || guild.id !== "1458190222042075251") return null;
+
+    const category = await guild.channels.fetch(PERSONAL_REPORT_CATEGORY_ID).catch(() => null);
+    if (!category || category.type !== ChannelType.GuildCategory) {
+        console.error(`[PERSONAL REPORT] Категория ${PERSONAL_REPORT_CATEGORY_ID} не найдена.`);
+        return null;
+    }
+
+    let channel = await findPersonalReportChannel(guild, member.id, true);
+    const permissionOverwrites = [
+        { id: guild.id, deny: ["ViewChannel"] },
+        { id: member.id, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory", "AttachFiles"] },
+        { id: PERSONAL_REPORT_HIGH_RANK_ROLE_ID, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory"] },
+        { id: client.user.id, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory", "ManageChannels", "ManageMessages"] }
+    ];
+
+    if (!channel) {
+        channel = await guild.channels.create({
+            name: personalReportChannelName(member),
+            type: ChannelType.GuildText,
+            parent: category.id,
+            topic: `${PERSONAL_REPORT_TOPIC_PREFIX}${member.id}`,
+            permissionOverwrites
+        }).catch(error => {
+            console.error("[PERSONAL REPORT CREATE ERROR]", error);
+            return null;
+        });
+
+        if (channel) {
+            const intro = personalReportNoticePayload({
+                title: "📁 Личный канал отчётов",
+                message: `**Участник:** <@${member.id}>\n\nСюда будут поступать личные РП отчёты и доказательства участника.`,
+                color: 0x2B2D31,
+                mentionHighRank: false
+            });
+            await channel.send(intro).catch(() => null);
+        }
+    } else {
+        // Если участнику повторно выдали роль, возвращаем ему доступ к его каналу.
+        await channel.permissionOverwrites.edit(member.id, {
+            ViewChannel: true,
+            SendMessages: true,
+            ReadMessageHistory: true,
+            AttachFiles: true
+        }).catch(() => null);
+    }
+
+    return channel;
+}
+
+async function notifyPersonalReportRoleLost(guild, userId, reason) {
+    const channel = await findPersonalReportChannel(guild, userId, true);
+    if (!channel) return;
+
+    await channel.send(personalReportNoticePayload({
+        userId,
+        title: reason === "leave" ? "📤 Участник вышел с сервера" : "⚠️ Роль участника снята",
+        message: reason === "leave"
+            ? `<@${userId}> вышел с сервера. Доступ к личному каналу закрыт.\n\n<@&${PERSONAL_REPORT_HIGH_RANK_ROLE_ID}> требуется учесть это в кадровом составе.`
+            : `<@${userId}> потерял роль <@&${PERSONAL_REPORT_ROLE_ID}>. Доступ к личному каналу закрыт.\n\n<@&${PERSONAL_REPORT_HIGH_RANK_ROLE_ID}> требуется проверить участника.`,
+        color: 0xE74C3C,
+        mentionHighRank: true
+    })).catch(() => null);
+
+    // Запрещаем просмотр участнику, но сам канал сохраняем.
+    await channel.permissionOverwrites.delete(userId).catch(() => null);
+}
+
+async function sendRpReportToPersonalChannel(guild, userId, rpData, evidenceUrl) {
+    const member = await guild.members.fetch(userId).catch(() => null);
+    if (!member || !member.roles.cache.has(PERSONAL_REPORT_ROLE_ID)) return;
+
+    const channel = await ensurePersonalReportChannel(member);
+    if (!channel) return;
+
+    const container = new ContainerBuilder()
+        .setAccentColor(0x3498DB)
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent("## 📋 Новый РП отчёт"))
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(
+            `**Участник:** <@${userId}>\n` +
+            `**На что подал:** ${clipLogText(rpData.label || "РП отчёт")}\n` +
+            `**Название:** ${clipLogText(rpData.rpName || rpData.label || "—")}\n` +
+            `**Баллов при одобрении:** +${rpData.points ?? 0}\n` +
+            `**Доказательство:** ${evidenceUrl}`
+        ));
+
+    if (evidenceUrl) {
+        container.addMediaGalleryComponents(
+            new MediaGalleryBuilder().addItems(
+                new MediaGalleryItemBuilder().setURL(evidenceUrl)
+            )
+        );
+    }
+
+    await channel.send({
+        components: [container],
+        flags: MessageFlags.IsComponentsV2,
+        allowedMentions: { parse: [] }
+    }).catch(error => console.error("[PERSONAL REPORT SEND ERROR]", error));
+}
+
+async function initPersonalReportChannels(guild) {
+    if (!guild || guild.id !== "1458190222042075251") return;
+    await guild.members.fetch().catch(() => null);
+    for (const member of guild.members.cache.values()) {
+        if (member.roles.cache.has(PERSONAL_REPORT_ROLE_ID)) {
+            await ensurePersonalReportChannel(member);
+        }
+    }
+}
 
 client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
     try {
@@ -4954,6 +5115,14 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
 
         const addedRoles = newRoles.filter(role => !oldRoles.has(role.id));
         const removedRoles = oldRoles.filter(role => !newRoles.has(role.id));
+
+        if (addedRoles.has(PERSONAL_REPORT_ROLE_ID)) {
+            await ensurePersonalReportChannel(newMember);
+        }
+        if (removedRoles.has(PERSONAL_REPORT_ROLE_ID)) {
+            await notifyPersonalReportRoleLost(newMember.guild, newMember.id, "role");
+        }
+
         if (addedRoles.size || removedRoles.size) {
             const roleAudit = await findRecentAuditEntry(newMember.guild, AuditLogEvent.MemberRoleUpdate, newMember.id);
             await sendForumLog(newMember.guild, "roleUpdate", [
