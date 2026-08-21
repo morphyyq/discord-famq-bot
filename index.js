@@ -2662,7 +2662,7 @@ Main состав — основа нашей семьи. Здесь играю�
             if (i.commandName === "shop_panel") {
                 await i.deferReply({ ephemeral: true });
 
-                const SHOP_BANNER_URL = "https://media.discordapp.net/attachments/1521193585876144238/1521509859210559568/65fbe8fa-d7fe-4471-9a5c-01b3147a820a.png?ex=6a4517fa&is=6a43c67a&hm=015b43d5b6abdd38c592f0d373e7291aabeb9f2e0410ae65029927986020538e&=&format=webp&quality=lossless&width=1876&height=625";
+                const SHOP_BANNER_URL = "https://cdn.discordapp.com/attachments/1540014036081446922/1540287038916526100/ChatGPT_Image_21_._2026_._12_10_20.png?ex=6a896797&is=6a881617&hm=f27de9f632adc54a3a42da4030571f1f5f65e407d67cc15f3598e239ba33ce08&";
 
                 const shopContainer = {
                     components: [
