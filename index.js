@@ -1080,6 +1080,22 @@ client.once(Events.ClientReady, async () => {
                     .setDescription("Количество сообщений или all для полной очистки")
                     .setRequired(true)
             )
+            .setDefaultMemberPermissions(0),
+        new SlashCommandBuilder()
+            .setName("clear_stop")
+            .setDescription("Остановить удаление сообщений")
+            .setDefaultMemberPermissions(0),
+        new SlashCommandBuilder()
+            .setName("clear_roles_stop")
+            .setDescription("Остановить снятие ролей")
+            .setDefaultMemberPermissions(0),
+        new SlashCommandBuilder()
+            .setName("add_role_all")
+            .setDescription("Выдать роль 1458410670071615580 всем участникам")
+            .setDefaultMemberPermissions(0),
+        new SlashCommandBuilder()
+            .setName("add_role_all_stop")
+            .setDescription("Остановить массовую выдачу роли")
             .setDefaultMemberPermissions(0)
     ].map(cmd => cmd.toJSON());
 
@@ -1635,7 +1651,36 @@ client.on(Events.ChannelDelete, async (channel) => {
 // =====================================================
 // CLEANUP COMMANDS — очистка сообщений и ролей
 // =====================================================
-async function clearChannelMessages(channel, requestedAmount) {
+const cleanupJobs = new Map();
+
+function cleanupJobKey(guildId, type) {
+    return `${guildId}:${type}`;
+}
+
+function beginCleanupJob(guildId, type) {
+    const key = cleanupJobKey(guildId, type);
+    const existing = cleanupJobs.get(key);
+    if (existing && !existing.finished) return null;
+
+    const job = { cancelled: false, finished: false };
+    cleanupJobs.set(key, job);
+    return job;
+}
+
+function finishCleanupJob(guildId, type, job) {
+    job.finished = true;
+    const key = cleanupJobKey(guildId, type);
+    if (cleanupJobs.get(key) === job) cleanupJobs.delete(key);
+}
+
+function stopCleanupJob(guildId, type) {
+    const job = cleanupJobs.get(cleanupJobKey(guildId, type));
+    if (!job || job.finished) return false;
+    job.cancelled = true;
+    return true;
+}
+
+async function clearChannelMessages(channel, requestedAmount, job) {
     const unlimited = requestedAmount === "all";
     const target = unlimited ? Infinity : requestedAmount;
     const maxPasses = unlimited ? 500 : Math.ceil(target / 100) + 2;
@@ -1645,6 +1690,7 @@ async function clearChannelMessages(channel, requestedAmount) {
     let failed = 0;
 
     for (let pass = 0; pass < maxPasses && deleted < target; pass++) {
+        if (job?.cancelled) break;
         const batch = await channel.messages.fetch({ limit: 100 }).catch(() => null);
         if (!batch || batch.size === 0) break;
 
@@ -1665,6 +1711,7 @@ async function clearChannelMessages(channel, requestedAmount) {
             } catch {
                 // Если массовое удаление недоступно, пробуем удалить сообщения по одному.
                 for (const message of recent) {
+                    if (job?.cancelled) break;
                     try {
                         await message.delete();
                         deleted++;
@@ -1686,7 +1733,7 @@ async function clearChannelMessages(channel, requestedAmount) {
         }
 
         for (const message of old) {
-            if (deleted >= target) break;
+            if (job?.cancelled || deleted >= target) break;
             try {
                 // Старше 14 дней Discord не удаляет bulkDelete — удаляем отдельно.
                 await message.delete();
@@ -1701,10 +1748,10 @@ async function clearChannelMessages(channel, requestedAmount) {
         if (!unlimited && deleted >= target) break;
     }
 
-    return { deleted, failed };
+    return { deleted, failed, stopped: !!job?.cancelled };
 }
 
-async function clearRolesFromAllHumanMembers(guild) {
+async function clearRolesFromAllHumanMembers(guild, job) {
     await guild.members.fetch();
 
     let processedMembers = 0;
@@ -1713,6 +1760,7 @@ async function clearRolesFromAllHumanMembers(guild) {
     let failedMembers = 0;
 
     for (const member of guild.members.cache.values()) {
+        if (job?.cancelled) break;
         // Защита от случайного отключения самого бота, ботов и владельца сервера.
         if (member.user.bot || member.id === guild.ownerId) {
             skippedMembers++;
@@ -1737,7 +1785,39 @@ async function clearRolesFromAllHumanMembers(guild) {
         }
     }
 
-    return { processedMembers, removedRoles, skippedMembers, failedMembers };
+    return { processedMembers, removedRoles, skippedMembers, failedMembers, stopped: !!job?.cancelled };
+}
+
+
+const MASS_ASSIGN_ROLE_ID = "1458410670071615580";
+
+async function addRoleToAllMembers(guild, job) {
+    const role = await guild.roles.fetch(MASS_ASSIGN_ROLE_ID).catch(() => null);
+    if (!role) throw new Error(`Роль ${MASS_ASSIGN_ROLE_ID} не найдена.`);
+
+    await guild.members.fetch();
+    let added = 0;
+    let alreadyHad = 0;
+    let failed = 0;
+
+    for (const member of guild.members.cache.values()) {
+        if (job?.cancelled) break;
+        if (member.roles.cache.has(role.id)) {
+            alreadyHad++;
+            continue;
+        }
+
+        try {
+            // По запросу пользователя пробуем выдать роль всем, включая ботов и владельца.
+            await member.roles.add(role);
+            added++;
+        } catch {
+            // Discord не позволит изменить участника/роль выше бота — считаем это ошибкой.
+            failed++;
+        }
+    }
+
+    return { added, alreadyHad, failed, stopped: !!job?.cancelled };
 }
 
 
@@ -1760,12 +1840,76 @@ client.on(Events.InteractionCreate, async (i) => {
                 }
             }
 
-            if (i.commandName === "clear_roles") {
+            if (i.commandName === "clear_stop") {
+                const stopped = stopCleanupJob(i.guild.id, "messages");
+                await i.reply({
+                    content: stopped
+                        ? "🛑 Удаление сообщений остановлено. Уже удалённые сообщения вернуть нельзя."
+                        : "ℹ️ Сейчас удаление сообщений не выполняется.",
+                    ephemeral: true
+                });
+                return;
+            }
+
+            if (i.commandName === "add_role_all_stop") {
+                const stopped = stopCleanupJob(i.guild.id, "add_role");
+                await i.reply({
+                    content: stopped
+                        ? "🛑 Массовая выдача роли остановлена. Уже выданные роли автоматически не снимутся."
+                        : "ℹ️ Сейчас массовая выдача роли не выполняется.",
+                    ephemeral: true
+                });
+                return;
+            }
+
+            if (i.commandName === "clear_roles_stop") {
+                const stopped = stopCleanupJob(i.guild.id, "roles");
+                await i.reply({
+                    content: stopped
+                        ? "🛑 Снятие ролей остановлено. Уже снятые роли автоматически не вернутся."
+                        : "ℹ️ Сейчас массовое снятие ролей не выполняется.",
+                    ephemeral: true
+                });
+                return;
+            }
+
+            if (i.commandName === "add_role_all") {
+                const job = beginCleanupJob(i.guild.id, "add_role");
+                if (!job) {
+                    await i.reply({ content: "⚠️ Массовая выдача роли уже выполняется. Для остановки используйте `/add_role_all_stop`.", ephemeral: true });
+                    return;
+                }
+
                 await i.deferReply({ ephemeral: true });
                 try {
-                    const result = await clearRolesFromAllHumanMembers(i.guild);
+                    const result = await addRoleToAllMembers(i.guild, job);
                     await i.editReply({
-                        content: `✅ Очистка ролей завершена.\n` +
+                        content: `${result.stopped ? "🛑 Выдача роли остановлена" : "✅ Выдача роли завершена"}.\n` +
+                            `Роль: <@&${MASS_ASSIGN_ROLE_ID}>\n` +
+                            `Выдано: **${result.added}**\n` +
+                            `Уже была: **${result.alreadyHad}**\n` +
+                            `Ошибок: **${result.failed}**`
+                    });
+                } catch (error) {
+                    console.error("[ADD ROLE ALL ERROR]", error);
+                    await i.editReply({ content: `❌ Не удалось выдать роль <@&${MASS_ASSIGN_ROLE_ID}>. Проверьте, что роль находится ниже роли бота.` });
+                } finally {
+                    finishCleanupJob(i.guild.id, "add_role", job);
+                }
+                return;
+            }
+
+            if (i.commandName === "clear_roles") {
+                const job = beginCleanupJob(i.guild.id, "roles");
+                if (!job) {
+                    await i.reply({ content: "⚠️ Снятие ролей уже выполняется. Для остановки используйте `/clear_roles_stop`.", ephemeral: true });
+                    return;
+                }
+                await i.deferReply({ ephemeral: true });
+                try {
+                    const result = await clearRolesFromAllHumanMembers(i.guild, job);
+                    await i.editReply({
+                        content: `${result.stopped ? "🛑 Очистка ролей остановлена" : "✅ Очистка ролей завершена"}.\n` +
                             `Участников обработано: **${result.processedMembers}**\n` +
                             `Ролей снято: **${result.removedRoles}**\n` +
                             `Пропущено: **${result.skippedMembers}**\n` +
@@ -1774,6 +1918,8 @@ client.on(Events.InteractionCreate, async (i) => {
                 } catch (error) {
                     console.error("[CLEAR ROLES ERROR]", error);
                     await i.editReply({ content: "❌ Не удалось выполнить массовое снятие ролей. Проверьте права и иерархию ролей бота." });
+                } finally {
+                    finishCleanupJob(i.guild.id, "roles", job);
                 }
                 return;
             }
@@ -1792,16 +1938,24 @@ client.on(Events.InteractionCreate, async (i) => {
                     return;
                 }
 
+                const job = beginCleanupJob(i.guild.id, "messages");
+                if (!job) {
+                    await i.reply({ content: "⚠️ Удаление сообщений уже выполняется. Для остановки используйте `/clear_stop`.", ephemeral: true });
+                    return;
+                }
+
                 await i.deferReply({ ephemeral: true });
                 try {
-                    const result = await clearChannelMessages(i.channel, isAll ? "all" : amount);
+                    const result = await clearChannelMessages(i.channel, isAll ? "all" : amount, job);
                     await i.editReply({
-                        content: `✅ Удалено сообщений: **${result.deleted}**.` +
+                        content: `${result.stopped ? "🛑 Удаление остановлено" : "✅ Удаление завершено"}. Удалено сообщений: **${result.deleted}**.` +
                             (result.failed ? ` Не удалось удалить: **${result.failed}**.` : "")
                     });
                 } catch (error) {
                     console.error("[CLEAR MESSAGES ERROR]", error);
                     await i.editReply({ content: "❌ Не удалось очистить канал. Проверьте права Manage Messages и Read Message History." });
+                } finally {
+                    finishCleanupJob(i.guild.id, "messages", job);
                 }
                 return;
             }
