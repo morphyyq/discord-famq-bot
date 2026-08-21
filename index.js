@@ -2622,10 +2622,14 @@ Main состав — основа нашей семьи. Здесь играю�
                 const RECRUIT_BANNER_URL = "https://cdn.discordapp.com/attachments/1540014036081446922/1540312552729485312/ChatGPT_Image_21_._2026_._13_51_56.png?ex=6a897f5a&is=6a882dda&hm=f35104585919ffe811048b944ac75553840f2642384210aba7ea2de2a524ab92&";
 
                 const row = new ActionRowBuilder().addComponents(
-                    new ButtonBuilder()
-                        .setCustomId("open_recruit_modal")
-                        .setLabel("Подать заявку")
-                        .setStyle(ButtonStyle.Secondary)
+                    new StringSelectMenuBuilder()
+                        .setCustomId("recruit_apply_menu")
+                        .setPlaceholder("Нажмите на меня, чтобы открыть меню")
+                        .addOptions({
+                            label: "Подать заявку",
+                            description: "Заполнить анкету в отдел Recruit",
+                            value: "open_recruit_modal"
+                        })
                 );
 
                 const recruitPanelContainer = new ContainerBuilder()
@@ -4564,7 +4568,10 @@ Main состав — основа нашей семьи. Здесь играю�
             return;
         }
 
-        if (i.isButton() && i.customId === "open_recruit_modal") {
+        if (
+            (i.isButton() && i.customId === "open_recruit_modal") ||
+            (i.isStringSelectMenu() && i.customId === "recruit_apply_menu" && i.values[0] === "open_recruit_modal")
+        ) {
             const modal = new ModalBuilder()
                 .setCustomId("apply_modal_recruit")
                 .setTitle("Заявка в Recruit");
