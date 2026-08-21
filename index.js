@@ -2619,25 +2619,41 @@ Main состав — основа нашей семьи. Здесь играю�
                 if (!config || !config.CHANNELS || !config.CHANNELS.RECRUIT) return;
                 const channel = await client.channels.fetch(config.CHANNELS.RECRUIT);
 
+                const RECRUIT_BANNER_URL = "https://cdn.discordapp.com/attachments/1540014036081446922/1540312552729485312/ChatGPT_Image_21_._2026_._13_51_56.png?ex=6a897f5a&is=6a882dda&hm=f35104585919ffe811048b944ac75553840f2642384210aba7ea2de2a524ab92&";
+
                 const row = new ActionRowBuilder().addComponents(
                     new ButtonBuilder()
                         .setCustomId("open_recruit_modal")
-                        .setLabel("Открыть заявку")
-                        .setStyle(ButtonStyle.Primary)
+                        .setLabel("Подать заявку")
+                        .setStyle(ButtonStyle.Secondary)
                 );
 
                 const recruitPanelContainer = new ContainerBuilder()
-                    .setAccentColor(0xD1D5DB)
-                    .addTextDisplayComponents(new TextDisplayBuilder().setContent(
-`## Recruit
--# Darkness Family · набор в отдел`
-                    ))
+                    .setAccentColor(0x2B2D31)
+                    .addMediaGalleryComponents(
+                        new MediaGalleryBuilder().addItems(
+                            new MediaGalleryItemBuilder().setURL(RECRUIT_BANNER_URL)
+                        )
+                    )
+                    .addTextDisplayComponents(
+                        new TextDisplayBuilder().setContent("# Отдел recruit\n-# Darkness Family · набор в команду")
+                    )
                     .addSeparatorComponents(new SeparatorBuilder())
-                    .addTextDisplayComponents(new TextDisplayBuilder().setContent(
-`Отдел Recruit отвечает за набор и адаптацию новых участников.
+                    .addTextDisplayComponents(
+                        new TextDisplayBuilder().setContent(
+`**Recruit** — отдел, отвечающий за набор новых участников и развитие семьи.
 
-Заполните короткую анкету честно и по делу. Рассмотрение занимает до **4 дней**.`
-                    ))
+### Что делает отдел
+• ищет и приглашает новых игроков;
+• помогает новичкам освоиться в семье;
+• поддерживает актив и атмосферу Darkness.
+
+### Важно
+• отвечайте на вопросы честно и подробно;
+• соблюдайте адекватность и уважение;
+• срок рассмотрения заявки — до **4 дней**.`
+                        )
+                    )
                     .addSeparatorComponents(new SeparatorBuilder())
                     .addActionRowComponents(row);
 
