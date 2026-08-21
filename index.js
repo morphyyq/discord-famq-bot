@@ -1317,9 +1317,9 @@ function buildReportReviewContainer({ userId, title, details, color = 0x3498DB, 
         .addSeparatorComponents(new SeparatorBuilder())
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(details));
 
+
     if (evidenceUrl) {
-        const isImage = evidenceUrl.startsWith("attachment://") ||
-            /\.(png|jpe?g|gif|webp)(?:\?|$)/i.test(evidenceUrl) ||
+        const isImage = /\.(png|jpe?g|gif|webp)(?:\?|$)/i.test(evidenceUrl) ||
             evidenceUrl.includes("cdn.discordapp.com/attachments/");
         if (isImage) {
             container.addMediaGalleryComponents(
@@ -1366,6 +1366,7 @@ async function sendPortfolioReportStatus(guild, userId, { status, type, details,
         flags: MessageFlags.IsComponentsV2,
         allowedMentions: { parse: [] }
     }).catch(error => console.error("[PORTFOLIO REPORT ERROR]", error));
+
 }
 
 client.on(Events.MessageCreate, async (msg) => {
@@ -1429,7 +1430,7 @@ client.on(Events.MessageCreate, async (msg) => {
             if (file) payload.files = [file];
             const reviewMessage = await reviewChannel.send(payload);
             if (reviewMessage) reportReviewMeta.set(reviewMessage.id, { evidenceUrl: att?.url || evidenceLink, type: rpData.label });
-            await msg.delete().catch(() => null);
+            setTimeout(() => msg.delete().catch(() => null), 8000);
             return;
         }
 
@@ -1477,7 +1478,7 @@ client.on(Events.MessageCreate, async (msg) => {
             if (file) payload.files = [file];
             const reviewMessage = await reviewChannel.send(payload);
             if (reviewMessage) reportReviewMeta.set(reviewMessage.id, { evidenceUrl: att?.url || evidenceLink, type: "МП отчёт" });
-            await msg.delete().catch(() => null);
+            setTimeout(() => msg.delete().catch(() => null), 8000);
             return;
         }
 
