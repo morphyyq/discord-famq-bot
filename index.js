@@ -233,6 +233,7 @@ const processed = new Set();
 const applications = new Map();
 const reportReviewLinks = new Map();
 const reportReviewMeta = new Map();
+const rpMenuInteractions = new Map();
 const modalLocks = new Set();
 
 // channelId -> userId — кто сейчас взял заявку на рассмотрение.
@@ -1337,6 +1338,13 @@ function scheduleEphemeralDelete(interaction, delay = 120000) {
     setTimeout(() => interaction.deleteReply().catch(() => null), delay);
 }
 
+async function deleteRpMenu(userId) {
+    const menuInteraction = rpMenuInteractions.get(userId);
+    if (!menuInteraction) return;
+    rpMenuInteractions.delete(userId);
+    await menuInteraction.deleteReply().catch(() => null);
+}
+
 async function sendPortfolioReportStatus(guild, userId, { status, type, details, evidenceUrl = null }) {
     const portfolioChannel = guild.channels.cache.find(channel => channel.topic === `portfolio_${userId}`);
     if (!portfolioChannel) return;
@@ -1381,6 +1389,7 @@ client.on(Events.MessageCreate, async (msg) => {
 
             const rpData = applications.get(awaitRpKey);
             await rpData.deletePrompt?.();
+            await rpData.deleteMenu?.();
             applications.delete(awaitRpKey);
 
             const rpChannel = await client.channels.fetch(rpData.channelId).catch(() => null);
@@ -3216,6 +3225,8 @@ Main состав — основа нашей семьи. Здесь играю�
             );
 
             await i.reply({ embeds: [rpMenuEmbed], components: [rpRow], ephemeral: true });
+            rpMenuInteractions.set(i.user.id, i);
+            setTimeout(() => deleteRpMenu(i.user.id), 120000);
             return;
         }
 
@@ -3253,7 +3264,8 @@ Main состав — основа нашей семьи. Здесь играю�
                     emoji: typeData.emoji,
                     channelId: i.channelId,
                     userId: i.user.id,
-                    deletePrompt: () => i.deleteReply().catch(() => null)
+                    deletePrompt: () => i.deleteReply().catch(() => null),
+                    deleteMenu: () => deleteRpMenu(i.user.id)
                 });
 
                 await i.reply({
@@ -3323,13 +3335,14 @@ Main состав — основа нашей семьи. Здесь играю�
                 emoji: typeData.emoji,
                 channelId: i.channelId,
                 userId: i.user.id,
-                deletePrompt: () => i.deleteReply().catch(() => null)
+                deletePrompt: () => i.deleteReply().catch(() => null),
+                deleteMenu: () => deleteRpMenu(i.user.id)
             });
 
             await i.reply({
                 content: `${typeData.emoji} **${typeData.label}** — \`${rpName}\`
 
-📎 Теперь отправьте скриншот-доказательство **прямо в этот канал**.
+📎 Теперь отправьте **фото или ссылку** на доказательство прямо в этот канал.
 ⚠️ У вас есть **2 минуты**, иначе заявка отменится.`,
                 ephemeral: true
             });
