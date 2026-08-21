@@ -1429,7 +1429,6 @@ client.on(Events.MessageCreate, async (msg) => {
             if (file) payload.files = [file];
             const reviewMessage = await reviewChannel.send(payload);
             if (reviewMessage) reportReviewMeta.set(reviewMessage.id, { evidenceUrl: att?.url || evidenceLink, type: rpData.label });
-            await sendRpReportToPersonalChannel(msg.guild, msg.author.id, rpData, att?.url || evidenceLink);
             await msg.delete().catch(() => null);
             return;
         }
