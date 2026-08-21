@@ -1318,18 +1318,6 @@ function buildReportReviewContainer({ userId, title, details, color = 0x3498DB, 
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(details));
 
 
-    if (evidenceUrl) {
-        const isImage = /\.(png|jpe?g|gif|webp)(?:\?|$)/i.test(evidenceUrl) ||
-            evidenceUrl.includes("cdn.discordapp.com/attachments/");
-        if (isImage) {
-            container.addMediaGalleryComponents(
-                new MediaGalleryBuilder().addItems(
-                    new MediaGalleryItemBuilder().setURL(evidenceUrl)
-                )
-            );
-        }
-    }
-
     if (buttons) container.addActionRowComponents(buttons);
     return container;
 }
@@ -1367,7 +1355,7 @@ async function sendPortfolioReportStatus(guild, userId, { status, type, details,
     const container = buildReportReviewContainer({
         userId,
         title: `<@${userId}>`,
-        details: `**Статус:** ${status}\\n**Тип:** ${type}\\n${details}`,
+        details: `**Статус:** ${status}\n**Тип:** ${type}\n${details}${evidenceUrl ? `\n**Доказательство:** ${evidenceUrl}` : ""}`,
         color: colors[status] || 0x2B2D31,
         evidenceUrl
     });
@@ -1378,6 +1366,10 @@ async function sendPortfolioReportStatus(guild, userId, { status, type, details,
         allowedMentions: { parse: [] }
     }).catch(error => console.error("[PORTFOLIO REPORT ERROR]", error));
 
+    if (evidenceUrl && /\.(png|jpe?g|gif|webp)(?:\?|$)/i.test(evidenceUrl)) {
+        const file = await downloadReportImage(evidenceUrl, "evidence.png");
+        if (file) await portfolioChannel.send({ files: [file] }).catch(() => null);
+    }
 }
 
 client.on(Events.MessageCreate, async (msg) => {
@@ -1438,8 +1430,8 @@ client.on(Events.MessageCreate, async (msg) => {
                 buttons: row
             });
             const payload = { components: [container], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
-            if (file) payload.files = [file];
             const reviewMessage = await reviewChannel.send(payload);
+            if (file) await reviewChannel.send({ files: [file] }).catch(() => null);
             if (reviewMessage) reportReviewMeta.set(reviewMessage.id, { evidenceUrl: att?.url || evidenceLink, type: rpData.label });
             setTimeout(() => msg.delete().catch(() => null), 8000);
             return;
@@ -1486,8 +1478,8 @@ client.on(Events.MessageCreate, async (msg) => {
                 buttons: row
             });
             const payload = { components: [container], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
-            if (file) payload.files = [file];
             const reviewMessage = await reviewChannel.send(payload);
+            if (file) await reviewChannel.send({ files: [file] }).catch(() => null);
             if (reviewMessage) reportReviewMeta.set(reviewMessage.id, { evidenceUrl: att?.url || evidenceLink, type: "МП отчёт" });
             setTimeout(() => msg.delete().catch(() => null), 8000);
             return;
