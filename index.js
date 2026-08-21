@@ -743,6 +743,7 @@ async function updateAFKEmbed(guild) {
         const channel = await guild.channels.fetch(afkChannelId).catch(() => null);
         if (!channel) return;
 
+        const AFK_BANNER_URL = "https://cdn.discordapp.com/attachments/1540014036081446922/1540289845220479016/ChatGPT_Image_21_._2026_._12_21_18.png?ex=6a896a34&is=6a8818b4&hm=387ec5f6b06641c1e530d2a67e9a51bfa4af8dafe6503bfe6b5e1e7de6f2b7b6&";
         const afkEntries = Object.entries(salary.afk);
         const total = afkEntries.length;
 
@@ -780,6 +781,11 @@ async function updateAFKEmbed(guild) {
 
         const container = new ContainerBuilder()
             .setAccentColor(0x1a1a2e)
+            .addMediaGalleryComponents(
+                new MediaGalleryBuilder().addItems(
+                    new MediaGalleryItemBuilder().setURL(AFK_BANNER_URL)
+                )
+            )
             .addTextDisplayComponents(
                 new TextDisplayBuilder().setContent(`## ⏱ Люди, находящиеся в АФК\n**Всего в афк ${total} человек:**`)
             )
