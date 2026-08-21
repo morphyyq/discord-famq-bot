@@ -1334,35 +1334,9 @@ async function deleteRpMenu(userId) {
 }
 
 async function sendPortfolioReportStatus(guild, userId, { status, type, details, evidenceUrl = null }) {
-    await guild.channels.fetch().catch(() => null);
-    const member = await guild.members.fetch(userId).catch(() => null);
-    const username = member?.user?.username?.toLowerCase().replace(/[^a-z0-9]/g, "") || `user${userId.slice(-4)}`;
-    const portfolioCategoryId = SERVERS[guild.id]?.CHANNELS?.PORTFOLIO_CATEGORY;
-    let portfolioChannel = guild.channels.cache.find(channel =>
-        channel.topic === `portfolio_${userId}` ||
-        (portfolioCategoryId && channel.parentId === portfolioCategoryId && channel.permissionOverwrites?.cache?.has(userId)) ||
-        (channel.name === username && (!portfolioCategoryId || channel.parentId === portfolioCategoryId))
-    );
-
-    if (!portfolioChannel && portfolioCategoryId) {
-        portfolioChannel = await guild.channels.create({
-            name: username.slice(0, 90),
-            type: ChannelType.GuildText,
-            parent: portfolioCategoryId,
-            topic: `portfolio_${userId}`,
-            permissionOverwrites: [
-                { id: guild.id, deny: ["ViewChannel"] },
-                { id: userId, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory", "AttachFiles"] },
-                { id: client.user.id, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory", "ManageMessages"] }
-            ]
-        }).catch(error => {
-            console.error(`[PORTFOLIO CREATE ERROR] ${userId}`, error);
-            return null;
-        });
-    }
-
+    const portfolioChannel = await findPersonalReportChannel(guild, userId, true);
     if (!portfolioChannel) {
-        console.warn(`[PORTFOLIO REPORT] Канал портфеля не найден для ${userId}`);
+        console.warn(`[PORTFOLIO REPORT] Ролевой личный канал не найден для ${userId}`);
         return;
     }
 
