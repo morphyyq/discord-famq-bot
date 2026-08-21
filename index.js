@@ -1403,7 +1403,7 @@ client.on(Events.MessageCreate, async (msg) => {
             const rpName = rpData.rpName || rpData.label;
             const fileName = "rp_screen.png";
             const file = att ? await downloadReportImage(att.url, fileName) : null;
-            const evidenceUrl = file ? `attachment://${fileName}` : (evidenceLink || att?.url || null);
+            const evidenceUrl = att?.url || evidenceLink || null;
 
             const encodedName = Buffer.from(rpName).toString("base64").replace(/=/g, "");
             const row = new ActionRowBuilder().addComponents(
@@ -1453,7 +1453,7 @@ client.on(Events.MessageCreate, async (msg) => {
 
             const fileName = "mp_screen.png";
             const file = att ? await downloadReportImage(att.url, fileName) : null;
-            const evidenceUrl = file ? `attachment://${fileName}` : (evidenceLink || att?.url || null);
+            const evidenceUrl = att?.url || evidenceLink || null;
             const safeId = `${msg.author.id}_${mpData.mpType.replace(/ /g, "")}_${mpData.result}_${mpData.points}_${mpData.channelId}`;
             const row = new ActionRowBuilder().addComponents(
                 new ButtonBuilder()
