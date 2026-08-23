@@ -2524,7 +2524,7 @@ client.on(Events.InteractionCreate, async (i) => {
                 if (!config || !config.CHANNELS || !config.CHANNELS.PANEL) return;
                 const channel = await client.channels.fetch(config.CHANNELS.PANEL);
 
-                const PANEL_BANNER_URL = "https://cdn.discordapp.com/attachments/1540014036081446922/1540278311345848351/ChatGPT_Image_21_._2026_._11_35_24.png";
+                const PANEL_BANNER_URL = "https://media.discordapp.net/attachments/1540014036081446922/1541149637073961141/ChatGPT_Image_21_._2026_._11_35_24.png?ex=6a8c8af2&is=6a8b3972&hm=79aaf5715073d6094f9977a05ad0cb4de4628af7186a7bf146fdf38216a904e4&=&format=webp&quality=lossless";
 
                 const panelContainer = {
                     components: [
