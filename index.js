@@ -2544,7 +2544,7 @@ client.on(Events.InteractionCreate, async (i) => {
                                 },
                                 {
                                     type: 10, // Text Display
-                                    content: "## <:hello:1516906998715912334> Путь в семью начинается здесь!\n\n-# <:df:1516907994552602634> Заявки в семью принимаются только на сервере **Orlando**.\n<:df:1516907994552602634> **Внимательно прочитайте все пункты** при подаче заявки. **Если не ответили на все пункты** — заявка будет **отклонена**.\n\n**・Срок рассмотрения заявки:** от 1 до 5 дней.\n**・Важно:** если у вас нет подходящих откатов — заявка будет **отклонена**.\n\n### - Дополнительные правила к подаче заявки:\n<:df:1516907994552602634> Откаты с GG — не более 1 недели назад (не менее 6 минут).\n<:df:1516907994552602634> Откаты с МП (ВЗЗ, MCL, Capt) — не более 60 дней назад. — **__при наличии!__**\n<:df:1516907994552602634> Откаты должны быть не в виде мувика/нарезки.\n<:df:1516907994552602634> Откаты должны быть с сайги и со спешика (минимум 2 отката).\n<:df:1516907994552602634> Подать заявку можно только при открытом наборе. Если нет доступа к подаче — набор закрыт.\n**・Выберите пункт в выпадающем меню:**"
+                                    content: "## <:hello:1516906998715912334> Путь в семью начинается здесь!\n\n-# <:df:1516907994552602634> Заявки в семью принимаются только на сервере **Denver**.\n<:df:1516907994552602634> **Внимательно прочитайте все пункты** при подаче заявки. **Если не ответили на все пункты** — заявка будет **отклонена**.\n\n**・Срок рассмотрения заявки:** от 1 до 5 дней.\n**・Важно:** если у вас нет подходящих откатов — заявка будет **отклонена**.\n\n### - Дополнительные правила к подаче заявки:\n<:df:1516907994552602634> Откаты с GG — не более 1 недели назад (не менее 6 минут).\n<:df:1516907994552602634> Откаты с МП (ВЗЗ, MCL, Capt) — не более 60 дней назад. — **__при наличии!__**\n<:df:1516907994552602634> Откаты должны быть не в виде мувика/нарезки.\n<:df:1516907994552602634> Откаты должны быть с сайги и со спешика (минимум 2 отката).\n<:df:1516907994552602634> Подать заявку можно только при открытом наборе. Если нет доступа к подаче — набор закрыт.\n**・Выберите пункт в выпадающем меню:**"
                                 },
                                 {
                                     type: 1, // Action Row
@@ -5184,6 +5184,7 @@ ${data.q5}
 const DEDUCT_ROLE_ID = "1458410670071615580";
 const PERSONAL_REPORT_ROLE_ID = "1458410756453306490";
 const PERSONAL_REPORT_CATEGORY_ID = "1540292539943485450";
+const PERSONAL_REPORT_ARCHIVE_CATEGORY_ID = "1541144152689999932";
 const PERSONAL_REPORT_HIGH_RANK_ROLE_ID = "1458484199735689299";
 const PERSONAL_REPORT_TOPIC_PREFIX = "darkness-personal-report:";
 
@@ -5218,7 +5219,7 @@ async function findPersonalReportChannel(guild, userId, refresh = false) {
     if (refresh) await guild.channels.fetch().catch(() => null);
     return guild.channels.cache.find(channel =>
         channel.type === ChannelType.GuildText &&
-        channel.parentId === PERSONAL_REPORT_CATEGORY_ID &&
+        [PERSONAL_REPORT_CATEGORY_ID, PERSONAL_REPORT_ARCHIVE_CATEGORY_ID].includes(channel.parentId) &&
         channel.topic === `${PERSONAL_REPORT_TOPIC_PREFIX}${userId}`
     ) || null;
 }
@@ -5263,6 +5264,14 @@ async function ensurePersonalReportChannel(member) {
             await channel.send(intro).catch(() => null);
         }
     } else {
+        // После повторной выдачи роли возвращаем архивный портфель в рабочую категорию.
+        if (channel.parentId !== PERSONAL_REPORT_CATEGORY_ID) {
+            const activeCategory = await guild.channels.fetch(PERSONAL_REPORT_CATEGORY_ID).catch(() => null);
+            if (activeCategory?.type === ChannelType.GuildCategory) {
+                await channel.setParent(activeCategory.id, { lockPermissions: false }).catch(() => null);
+            }
+        }
+
         // Если участнику повторно выдали роль, возвращаем ему доступ к его каналу.
         if (channel.name !== personalReportChannelName(member)) {
             await channel.setName(personalReportChannelName(member)).catch(() => null);
@@ -5276,6 +5285,32 @@ async function ensurePersonalReportChannel(member) {
     }
 
     return channel;
+}
+
+function componentsContainText(components, text) {
+    if (!components) return false;
+    for (const component of components) {
+        if (typeof component.content === "string" && component.content.includes(text)) return true;
+        if (component.components && componentsContainText(component.components, text)) return true;
+    }
+    return false;
+}
+
+async function deletePersonalReportRoleLostNotice(guild, userId) {
+    const channel = await findPersonalReportChannel(guild, userId, true);
+    if (!channel) return;
+
+    const messages = await channel.messages.fetch({ limit: 100 }).catch(() => null);
+    if (!messages) return;
+
+    const notices = messages.filter(message =>
+        message.author?.id === client.user.id &&
+        componentsContainText(message.components, "Роль участника снята")
+    );
+
+    for (const notice of notices.values()) {
+        await notice.delete().catch(() => null);
+    }
 }
 
 async function notifyPersonalReportRoleLost(guild, userId, reason) {
@@ -5292,7 +5327,13 @@ async function notifyPersonalReportRoleLost(guild, userId, reason) {
         mentionHighRank: true
     })).catch(() => null);
 
-    // Запрещаем просмотр участнику, но сам канал сохраняем.
+    // Переносим портфель в архивную категорию, канал не удаляем.
+    const archiveCategory = await guild.channels.fetch(PERSONAL_REPORT_ARCHIVE_CATEGORY_ID).catch(() => null);
+    if (archiveCategory?.type === ChannelType.GuildCategory && channel.parentId !== archiveCategory.id) {
+        await channel.setParent(archiveCategory.id, { lockPermissions: false }).catch(() => null);
+    }
+
+    // Запрещаем просмотр участнику, но сам канал и история сохраняются.
     await channel.permissionOverwrites.delete(userId).catch(() => null);
 }
 
@@ -5355,6 +5396,7 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
 
         if (addedRoles.has(PERSONAL_REPORT_ROLE_ID)) {
             await ensurePersonalReportChannel(newMember);
+            await deletePersonalReportRoleLostNotice(newMember.guild, newMember.id);
         }
         if (removedRoles.has(PERSONAL_REPORT_ROLE_ID)) {
             await notifyPersonalReportRoleLost(newMember.guild, newMember.id, "role");
