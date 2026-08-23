@@ -1179,6 +1179,7 @@ client.once(Events.ClientReady, async () => {
         await updateOnlineMonitor();
         await updateAFKEmbed(mainGuild);
         await ensureAllLogThreads(mainGuild);
+        await ensurePersonalReportCategoryAccess(mainGuild);
         await initPersonalReportChannels(mainGuild);
         await initVoiceSessions(mainGuild);
     }
@@ -5185,6 +5186,7 @@ const DEDUCT_ROLE_ID = "1458410670071615580";
 const PERSONAL_REPORT_ROLE_ID = "1458410756453306490";
 const PERSONAL_REPORT_CATEGORY_ID = "1540292539943485450";
 const PERSONAL_REPORT_ARCHIVE_CATEGORY_ID = "1541144152689999932";
+const PERSONAL_REPORT_VIEW_ROLE_ID = "1541082447293452450";
 const PERSONAL_REPORT_HIGH_RANK_ROLE_ID = "1458484199735689299";
 const PERSONAL_REPORT_TOPIC_PREFIX = "darkness-personal-report:";
 
@@ -5238,6 +5240,7 @@ async function ensurePersonalReportChannel(member) {
     const permissionOverwrites = [
         { id: guild.id, deny: ["ViewChannel"] },
         { id: member.id, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory", "AttachFiles"] },
+        { id: PERSONAL_REPORT_VIEW_ROLE_ID, allow: ["ViewChannel", "ReadMessageHistory"] },
         { id: PERSONAL_REPORT_HIGH_RANK_ROLE_ID, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory"] },
         { id: client.user.id, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory", "ManageChannels", "ManageMessages"] }
     ];
@@ -5373,6 +5376,34 @@ async function sendRpReportToPersonalChannel(guild, userId, rpData, evidenceUrl)
         flags: MessageFlags.IsComponentsV2,
         allowedMentions: { parse: [] }
     }).catch(error => console.error("[PERSONAL REPORT SEND ERROR]", error));
+}
+
+async function ensurePersonalReportCategoryAccess(guild) {
+    if (!guild || guild.id !== "1458190222042075251") return;
+
+    await guild.channels.fetch().catch(() => null);
+    for (const categoryId of [PERSONAL_REPORT_CATEGORY_ID, PERSONAL_REPORT_ARCHIVE_CATEGORY_ID]) {
+        const category = await guild.channels.fetch(categoryId).catch(() => null);
+        if (!category || category.type !== ChannelType.GuildCategory) {
+            console.error(`[PERSONAL REPORT] Категория ${categoryId} не найдена.`);
+            continue;
+        }
+
+        await category.permissionOverwrites.edit(PERSONAL_REPORT_VIEW_ROLE_ID, {
+            ViewChannel: true,
+            ReadMessageHistory: true
+        }).catch(() => null);
+
+        const portfolioChannels = guild.channels.cache.filter(channel =>
+            channel.type === ChannelType.GuildText && channel.parentId === category.id
+        );
+        for (const channel of portfolioChannels.values()) {
+            await channel.permissionOverwrites.edit(PERSONAL_REPORT_VIEW_ROLE_ID, {
+                ViewChannel: true,
+                ReadMessageHistory: true
+            }).catch(() => null);
+        }
+    }
 }
 
 async function initPersonalReportChannels(guild) {
