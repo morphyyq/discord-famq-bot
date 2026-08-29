@@ -3924,11 +3924,14 @@ Main состав — основа нашей семьи. Здесь играю�
             await i.deferReply({ flags: MessageFlags.Ephemeral });
 
             const member = await i.guild.members.fetch(i.user.id).catch(() => null);
-            const result = member ? await ensurePrivatePortfolioChannel(member) : null;
+            // Кнопка только открывает уже созданный портфель и никогда не создаёт новый.
+            const result = member
+                ? await ensurePrivatePortfolioChannel(member, { createIfMissing: false })
+                : null;
             const portfolioChannel = result?.channel || null;
 
             if (!portfolioChannel) {
-                await i.editReply({ content: "❌ Не удалось создать портфель. Проверьте права бота и наличие категории портфелей." });
+                await i.editReply({ content: "❌ Ваш портфель не найден. Обратитесь к администрации." });
                 return;
             }
 
@@ -5502,46 +5505,62 @@ async function createPrivatePortfolioChannel(member, topicPrefix = PORTFOLIO_TOP
     return channel;
 }
 
-async function ensurePrivatePortfolioChannel(member) {
+async function ensurePrivatePortfolioChannel(member, { createIfMissing = true } = {}) {
     const guild = member?.guild;
     if (!guild || guild.id !== "1458190222042075251") return { channel: null, created: false };
 
-    let channel = await findPersonalReportChannel(guild, member.id, true);
-    let created = false;
+    // Сначала ищем в кэше — обычное нажатие кнопки не должно загружать все каналы сервера.
+    let channel = await findPersonalReportChannel(guild, member.id, false);
     if (!channel) {
+        // Полное обновление нужно только если портфель отсутствует в кэше.
+        await guild.channels.fetch().catch(() => null);
+        channel = await findPersonalReportChannel(guild, member.id, false);
+    }
+
+    let created = false;
+    if (!channel && createIfMissing) {
         channel = await createPrivatePortfolioChannel(member);
         created = Boolean(channel);
     }
     if (!channel) return { channel: null, created: false };
 
-    if (isArchivePortfolioCategory(guild, channel.parentId)) {
+    const isArchived = isArchivePortfolioCategory(guild, channel.parentId);
+    if (isArchived) {
         const activeCategory = await getAvailablePortfolioCategory(guild, "active", 1);
         if (activeCategory && channel.parentId !== activeCategory.id) {
             await channel.setParent(activeCategory.id, { lockPermissions: false }).catch(() => null);
         }
     }
 
-    if (channel.name !== personalReportChannelName(member)) {
-        await channel.setName(personalReportChannelName(member)).catch(() => null);
+    const expectedName = personalReportChannelName(member);
+    if (channel.name !== expectedName) {
+        await channel.setName(expectedName).catch(() => null);
     }
-    await channel.permissionOverwrites.edit(member.id, {
-        ViewChannel: true,
-        SendMessages: true,
-        ReadMessageHistory: true,
-        AttachFiles: true
-    }).catch(() => null);
-    await channel.permissionOverwrites.edit(PERSONAL_REPORT_VIEW_ROLE_ID, {
-        ViewChannel: true,
-        ReadMessageHistory: true
-    }).catch(() => null);
-    await channel.permissionOverwrites.edit(PERSONAL_REPORT_HIGH_RANK_ROLE_ID, {
-        ViewChannel: true,
-        SendMessages: true,
-        ReadMessageHistory: true
-    }).catch(() => null);
 
-    await ensurePortfolioInfoPanel(member, channel);
-    await ensurePortfolioAdminThread(member, channel);
+    // Тяжёлые проверки и запросы выполняем только после создания или восстановления архива.
+    if (created || isArchived) {
+        await channel.permissionOverwrites.edit(member.id, {
+            ViewChannel: true,
+            SendMessages: true,
+            ReadMessageHistory: true,
+            AttachFiles: true
+        }).catch(() => null);
+        await channel.permissionOverwrites.edit(PERSONAL_REPORT_VIEW_ROLE_ID, {
+            ViewChannel: true,
+            ReadMessageHistory: true
+        }).catch(() => null);
+        await channel.permissionOverwrites.edit(PERSONAL_REPORT_HIGH_RANK_ROLE_ID, {
+            ViewChannel: true,
+            SendMessages: true,
+            ReadMessageHistory: true
+        }).catch(() => null);
+        await ensurePortfolioInfoPanel(member, channel);
+    }
+
+    if (created || isArchived) {
+        await ensurePortfolioAdminThread(member, channel);
+    }
+
     return { channel, created };
 }
 
