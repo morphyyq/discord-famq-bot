@@ -5574,11 +5574,13 @@ async function ensurePortfolioInfoPanel(member, channel) {
 
     const infoMessages = messages.filter(message =>
         message.author?.id === client.user.id && (
+            componentsContainText(message.components, "Сюда ты должен кидать") ||
             componentsContainText(message.components, "Сюда необходимо отправлять") ||
             message.embeds?.some(embed => String(embed.title || "").includes("Личный канал отчётов"))
         )
     );
     const currentMessage = infoMessages.find(message =>
+        componentsContainText(message.components, "Сюда ты должен кидать") ||
         componentsContainText(message.components, "Сюда необходимо отправлять")
     );
 
