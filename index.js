@@ -1188,6 +1188,8 @@ client.once(Events.ClientReady, async () => {
         await ensurePersonalReportCategoryAccess(mainGuild);
         await migrateForumPortfoliosToChannels(mainGuild);
         await restoreLegacyPortfolioChannels(mainGuild);
+        await removeLegacyPortfolioAdminChannels(mainGuild);
+        await normalizePortfolioChannelNames(mainGuild);
         await ensurePortfolioAdminPanelAccess(mainGuild);
         await initPersonalReportChannels(mainGuild);
         await initVoiceSessions(mainGuild);
@@ -5302,7 +5304,7 @@ function portfolioBaseChannelName(member) {
 }
 
 function personalReportChannelName(member) {
-    return `└ ${portfolioBaseChannelName(member)}`.slice(0, 100);
+    return portfolioBaseChannelName(member).slice(0, 100);
 }
 
 function extractPortfolioUserId(topic) {
@@ -5573,6 +5575,42 @@ async function migrateForumPortfoliosToChannels(guild) {
         }
 
         await thread.setArchived(true).catch(() => null);
+    }
+}
+
+async function normalizePortfolioChannelNames(guild) {
+    if (!guild || guild.id !== "1458190222042075251") return;
+    await guild.channels.fetch().catch(() => null);
+
+    const portfolioChannels = guild.channels.cache.filter(channel =>
+        channel.type === ChannelType.GuildText && extractPortfolioUserId(channel.topic)
+    );
+
+    for (const channel of portfolioChannels.values()) {
+        const userId = extractPortfolioUserId(channel.topic);
+        const member = await guild.members.fetch(userId).catch(() => null);
+        if (!member) continue;
+        const expectedName = personalReportChannelName(member);
+        if (channel.name !== expectedName) {
+            await channel.setName(expectedName).catch(() => null);
+        }
+    }
+}
+
+async function removeLegacyPortfolioAdminChannels(guild) {
+    if (!guild || guild.id !== "1458190222042075251") return;
+    await guild.channels.fetch().catch(() => null);
+
+    const legacyAdminChannels = guild.channels.cache.filter(channel =>
+        channel.type === ChannelType.GuildText &&
+        (
+            String(channel.topic || "").startsWith(PORTFOLIO_ADMIN_TOPIC_PREFIX) ||
+            String(channel.name || "").startsWith("┌ Админ ")
+        )
+    );
+
+    for (const channel of legacyAdminChannels.values()) {
+        await channel.delete("Удаление старого отдельного админ-канала портфеля").catch(() => null);
     }
 }
 
