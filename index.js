@@ -3809,15 +3809,25 @@ Main состав — основа нашей семьи. Здесь играю�
                 return;
             }
 
+            await i.deferUpdate().catch(() => null);
             const direction = i.customId.startsWith("portfolio_admin_next_") ? 1 : -1;
             const currentPage = Number(i.customId.split("_").pop()) || 0;
             const nextPage = Math.max(0, currentPage + direction);
-            const panelContainer = await buildPortfolioAdminPanelContainer(i.guild, nextPage);
-            await i.update({
-                components: [panelContainer],
-                flags: MessageFlags.IsComponentsV2,
-                allowedMentions: { parse: [] }
-            });
+
+            try {
+                const panelContainer = await buildPortfolioAdminPanelContainer(i.guild, nextPage);
+                await i.editReply({
+                    components: [panelContainer],
+                    flags: MessageFlags.IsComponentsV2,
+                    allowedMentions: { parse: [] }
+                });
+            } catch (error) {
+                console.error("[PORTFOLIO PANEL PAGINATION ERROR]", error);
+                await i.editReply({
+                    content: "❌ Не удалось обновить страницу панели портфелей.",
+                    components: []
+                }).catch(() => null);
+            }
             return;
         }
 
