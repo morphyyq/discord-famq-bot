@@ -1195,6 +1195,7 @@ client.once(Events.ClientReady, async () => {
         await removeLegacyPortfolioAdminChannels(mainGuild);
         await normalizePortfolioChannelNames(mainGuild);
         await initPersonalReportChannels(mainGuild);
+        await syncAllPortfolioAdminThreads(mainGuild);
         await initVoiceSessions(mainGuild);
     }
     setInterval(updateOnlineMonitor, 60000);
@@ -5901,6 +5902,83 @@ async function findPortfolioAdminThread(portfolioChannel) {
         .find(thread => thread.name === "Админ-панель") || null;
 }
 
+// Участники админ-веток портфелей: хайки и чекеры.
+// Администраторов сохраняем в ветках независимо от этих ролей, чтобы не лишать их доступа.
+function shouldBePortfolioAdminThreadMember(member) {
+    return Boolean(
+        member &&
+        !member.user?.bot &&
+        (
+            member.permissions?.has(PermissionFlagsBits.Administrator) ||
+            member.roles?.cache?.has(PERSONAL_REPORT_VIEW_ROLE_ID) ||
+            member.roles?.cache?.has(PERSONAL_REPORT_HIGH_RANK_ROLE_ID)
+        )
+    );
+}
+
+async function syncPortfolioAdminThreadMember(thread, member) {
+    if (!thread || !member || member.user?.bot) return;
+
+    if (shouldBePortfolioAdminThreadMember(member)) {
+        if (thread.archived) await thread.setArchived(false).catch(() => null);
+        await thread.members.add(member.id).catch(() => null);
+    } else {
+        await thread.members.remove(member.id).catch(() => null);
+    }
+}
+
+async function syncPortfolioAdminMemberInAllThreads(member) {
+    const guild = member?.guild;
+    if (!guild || guild.id !== "1458190222042075251") return;
+
+    await guild.channels.fetch().catch(() => null);
+    const portfolioChannels = guild.channels.cache.filter(channel =>
+        channel.type === ChannelType.GuildText && extractPortfolioUserId(channel.topic)
+    );
+
+    for (const portfolioChannel of portfolioChannels.values()) {
+        let thread = await findPortfolioAdminThread(portfolioChannel);
+
+        // Если ветка была удалена/ещё не создалась — восстанавливаем её вместе с панелью.
+        if (!thread) {
+            const ownerId = extractPortfolioUserId(portfolioChannel.topic);
+            const owner = ownerId ? await guild.members.fetch(ownerId).catch(() => null) : null;
+            if (owner) thread = await ensurePortfolioAdminThread(owner, portfolioChannel);
+        }
+
+        if (thread) await syncPortfolioAdminThreadMember(thread, member);
+    }
+}
+
+async function syncAllPortfolioAdminThreads(guild) {
+    if (!guild || guild.id !== "1458190222042075251") return;
+
+    await guild.members.fetch().catch(() => null);
+    await guild.channels.fetch().catch(() => null);
+
+    const portfolioChannels = guild.channels.cache.filter(channel =>
+        channel.type === ChannelType.GuildText && extractPortfolioUserId(channel.topic)
+    );
+
+    for (const portfolioChannel of portfolioChannels.values()) {
+        const ownerId = extractPortfolioUserId(portfolioChannel.topic);
+        const owner = ownerId ? await guild.members.fetch(ownerId).catch(() => null) : null;
+        if (!owner) continue;
+
+        const thread = await ensurePortfolioAdminThread(owner, portfolioChannel);
+        if (!thread) continue;
+
+        const threadMembers = await thread.members.fetch().catch(() => null);
+        if (!threadMembers) continue;
+
+        for (const threadMember of threadMembers.values()) {
+            const guildMember = guild.members.cache.get(threadMember.id) ||
+                await guild.members.fetch(threadMember.id).catch(() => null);
+            await syncPortfolioAdminThreadMember(thread, guildMember);
+        }
+    }
+}
+
 async function ensurePortfolioAdminThread(member, portfolioChannel) {
     if (!member?.guild || !portfolioChannel) return null;
     const guild = member.guild;
@@ -5921,14 +5999,20 @@ async function ensurePortfolioAdminThread(member, portfolioChannel) {
     if (thread.archived) await thread.setArchived(false).catch(() => null);
 
     const admins = guild.members.cache.filter(currentMember =>
-        !currentMember.user.bot && (
-            currentMember.permissions.has(PermissionFlagsBits.Administrator) ||
-            currentMember.roles.cache.has(PERSONAL_REPORT_VIEW_ROLE_ID) ||
-            currentMember.roles.cache.has(PERSONAL_REPORT_HIGH_RANK_ROLE_ID)
-        )
+        shouldBePortfolioAdminThreadMember(currentMember)
     );
     for (const admin of admins.values()) {
-        await thread.members.add(admin.id).catch(() => null);
+        await syncPortfolioAdminThreadMember(thread, admin);
+    }
+
+    // Чистим старых участников: если хайка/чекера больше нет, доступ к ветке убирается.
+    const threadMembers = await thread.members.fetch().catch(() => null);
+    if (threadMembers) {
+        for (const threadMember of threadMembers.values()) {
+            const guildMember = guild.members.cache.get(threadMember.id) ||
+                await guild.members.fetch(threadMember.id).catch(() => null);
+            await syncPortfolioAdminThreadMember(thread, guildMember);
+        }
     }
 
     const messages = await thread.messages.fetch({ limit: 50 }).catch(() => null);
@@ -6002,6 +6086,16 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
         }
         if (removedRoles.has(PERSONAL_REPORT_ROLE_ID)) {
             await notifyPersonalReportRoleLost(newMember.guild, newMember.id, "role");
+        }
+
+        // Автоматически добавляем/удаляем хайков и чекеров во всех админ-ветках портфелей.
+        const portfolioStaffRoleChanged =
+            addedRoles.has(PERSONAL_REPORT_VIEW_ROLE_ID) ||
+            addedRoles.has(PERSONAL_REPORT_HIGH_RANK_ROLE_ID) ||
+            removedRoles.has(PERSONAL_REPORT_VIEW_ROLE_ID) ||
+            removedRoles.has(PERSONAL_REPORT_HIGH_RANK_ROLE_ID);
+        if (portfolioStaffRoleChanged) {
+            await syncPortfolioAdminMemberInAllThreads(newMember);
         }
 
         if (addedRoles.size || removedRoles.size) {
