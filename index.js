@@ -3795,6 +3795,7 @@ Main состав — основа нашей семьи. Здесь играю�
                 return;
             }
 
+            await removeLegacyPortfolioAdminChannels(i.guild);
             await ensurePortfolioAdminPanelAccess(i.guild);
             const panelContainer = await buildSharedPortfolioPanelContainer(i.guild, 0);
             await panelChannel.send({
@@ -5601,16 +5602,23 @@ async function removeLegacyPortfolioAdminChannels(guild) {
     if (!guild || guild.id !== "1458190222042075251") return;
     await guild.channels.fetch().catch(() => null);
 
-    const legacyAdminChannels = guild.channels.cache.filter(channel =>
-        channel.type === ChannelType.GuildText &&
-        (
-            String(channel.topic || "").startsWith(PORTFOLIO_ADMIN_TOPIC_PREFIX) ||
-            String(channel.name || "").startsWith("┌ Админ ")
-        )
-    );
+    const legacyAdminChannels = guild.channels.cache.filter(channel => {
+        if (channel.type !== ChannelType.GuildText) return false;
+        const topic = String(channel.topic || "").toLowerCase();
+        const name = String(channel.name || "").toLowerCase().replace(/\s+/g, " ").trim();
+        return topic.startsWith(PORTFOLIO_ADMIN_TOPIC_PREFIX.toLowerCase()) ||
+            name.startsWith("┌ админ ") ||
+            name.startsWith("admin-") ||
+            name.startsWith("admin-└ ");
+    });
 
     for (const channel of legacyAdminChannels.values()) {
-        await channel.delete("Удаление старого отдельного админ-канала портфеля").catch(() => null);
+        try {
+            await channel.delete("Удаление старого отдельного админ-канала портфеля");
+            console.log(`[PORTFOLIO] Удалён старый админ-канал: ${channel.name} (${channel.id})`);
+        } catch (error) {
+            console.error(`[PORTFOLIO ADMIN DELETE ERROR] ${channel.name} (${channel.id})`, error);
+        }
     }
 }
 
