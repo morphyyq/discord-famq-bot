@@ -1186,6 +1186,7 @@ client.once(Events.ClientReady, async () => {
         await restoreLegacyPortfolioChannels(mainGuild);
         await ensureAllPortfolioAdminChannels(mainGuild);
         await initPersonalReportChannels(mainGuild);
+        await alignPortfolioChannelPairs(mainGuild);
         await initVoiceSessions(mainGuild);
     }
     setInterval(updateOnlineMonitor, 60000);
@@ -5578,6 +5579,7 @@ async function ensurePrivatePortfolioChannel(member, { restoreFromArchive = fals
     if (adminChannel && adminChannel.parentId !== channel.parentId) {
         await adminChannel.setParent(channel.parentId, { lockPermissions: false }).catch(() => null);
     }
+    await alignPortfolioChannelPairs(guild);
 
     return { channel, adminChannel, created };
 }
@@ -5749,6 +5751,54 @@ async function restoreLegacyPortfolioChannels(guild) {
         }
 
         if (member) await ensurePortfolioAdminChannel(member, channel);
+    }
+}
+
+async function alignPortfolioChannelPairs(guild) {
+    if (!guild || guild.id !== "1458190222042075251") return;
+    await guild.channels.fetch().catch(() => null);
+
+    const categories = guild.channels.cache.filter(channel =>
+        channel.type === ChannelType.GuildCategory && portfolioCategoryIds(guild).includes(channel.id)
+    );
+
+    for (const category of categories.values()) {
+        const children = [...guild.channels.cache.values()]
+            .filter(channel => channel.type === ChannelType.GuildText && channel.parentId === category.id)
+            .sort((a, b) => a.position - b.position);
+        if (children.length < 2) continue;
+
+        const portfolios = new Map();
+        const admins = new Map();
+        for (const channel of children) {
+            const portfolioUserId = extractPortfolioUserId(channel.topic);
+            const adminTopic = String(channel.topic || "");
+            if (portfolioUserId) portfolios.set(portfolioUserId, channel);
+            if (adminTopic.startsWith(PORTFOLIO_ADMIN_TOPIC_PREFIX)) {
+                admins.set(adminTopic.replace(PORTFOLIO_ADMIN_TOPIC_PREFIX, ""), channel);
+            }
+        }
+
+        const pairs = [...portfolios.keys()]
+            .filter(userId => admins.has(userId))
+            .map(userId => ({
+                userId,
+                portfolio: portfolios.get(userId),
+                admin: admins.get(userId)
+            }))
+            .sort((a, b) => a.portfolio.name.localeCompare(b.portfolio.name));
+        if (!pairs.length) continue;
+
+        const pairedIds = new Set(pairs.flatMap(pair => [pair.portfolio.id, pair.admin.id]));
+        const unpaired = children.filter(channel => !pairedIds.has(channel.id));
+        const ordered = [...pairs.flatMap(pair => [pair.admin, pair.portfolio]), ...unpaired];
+        const positions = children.map(channel => channel.position).sort((a, b) => a - b);
+
+        await guild.channels.setPositions(
+            ordered.map((channel, index) => ({ channel: channel.id, position: positions[index] }))
+        ).catch(error => {
+            console.error(`[PORTFOLIO ALIGN ERROR] ${category.id}`, error);
+        });
     }
 }
 
