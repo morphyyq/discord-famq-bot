@@ -5556,12 +5556,7 @@ function buildPortfolioInfoPayload(member) {
         .addSeparatorComponents(new SeparatorBuilder())
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(
             `**Участник:** <@${member.id}>\n\n` +
-            `Сюда необходимо отправлять:\n` +
-            `• скрины;\n` +
-            `• откаты с каптов;\n` +
-            `• РП-отчёты;\n` +
-            `• откаты с арены;\n` +
-            `• подтверждения активности.`
+            `Сюда ты должен кидать скрины, откаты с каптов, РП-шек, арены и проявлять актив.`
         ));
 
     return {
@@ -5586,6 +5581,9 @@ async function ensurePortfolioInfoPanel(member, channel) {
         componentsContainText(message.components, "Сюда необходимо отправлять")
     );
 
+    if (currentMessage) {
+        await currentMessage.edit(buildPortfolioInfoPayload(member)).catch(() => null);
+    }
     for (const message of infoMessages.values()) {
         if (message.id !== currentMessage?.id) await message.delete().catch(() => null);
     }
