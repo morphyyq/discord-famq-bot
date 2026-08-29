@@ -5765,7 +5765,12 @@ async function ensureAllPortfolioAdminChannels(guild) {
     for (const channel of portfolioChannels.values()) {
         const userId = extractPortfolioUserId(channel.topic);
         const member = await guild.members.fetch(userId).catch(() => null);
-        if (member) await ensurePortfolioAdminChannel(member, channel);
+        if (!member) continue;
+
+        if (channel.name !== personalReportChannelName(member)) {
+            await channel.setName(personalReportChannelName(member)).catch(() => null);
+        }
+        await ensurePortfolioAdminChannel(member, channel);
     }
 }
 
