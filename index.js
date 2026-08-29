@@ -1123,6 +1123,10 @@ client.once(Events.ClientReady, async () => {
             .setDescription("Отправить панель семейного магазина баллов")
             .setDefaultMemberPermissions(0),
         new SlashCommandBuilder()
+            .setName("portfolio_panel")
+            .setDescription("Отправить общую панель управления портфелями")
+            .setDefaultMemberPermissions(0),
+        new SlashCommandBuilder()
             .setName("clear_roles")
             .setDescription("Снять обычные роли со всех участников-людей")
             .setDefaultMemberPermissions(0),
@@ -1184,9 +1188,8 @@ client.once(Events.ClientReady, async () => {
         await ensurePersonalReportCategoryAccess(mainGuild);
         await migrateForumPortfoliosToChannels(mainGuild);
         await restoreLegacyPortfolioChannels(mainGuild);
-        await ensureAllPortfolioAdminChannels(mainGuild);
+        await ensurePortfolioAdminPanelAccess(mainGuild);
         await initPersonalReportChannels(mainGuild);
-        await alignPortfolioChannelPairs(mainGuild);
         await initVoiceSessions(mainGuild);
     }
     setInterval(updateOnlineMonitor, 60000);
@@ -3774,9 +3777,84 @@ Main состав — основа нашей семьи. Здесь играю�
         }
 
         // =====================================================
-        // НАЧИСЛЕНИЕ БАЛЛОВ ИЗ АДМИН-КАНАЛА ПОРТФЕЛЯ
+        // ОБЩАЯ АДМИН-ПАНЕЛЬ ПОРТФЕЛЕЙ
         // =====================================================
-        if (i.isButton() && (i.customId.startsWith("portfolio_reward_rp_") || i.customId.startsWith("portfolio_reward_capt_"))) {
+        if (i.commandName === "portfolio_panel") {
+            await i.deferReply({ flags: MessageFlags.Ephemeral });
+
+            if (!hasPortfolioAdminAccess(i)) {
+                await i.editReply({ content: "❌ У вас нет доступа к панели портфелей." });
+                return;
+            }
+
+            const panelChannel = await i.guild.channels.fetch(PORTFOLIO_ADMIN_PANEL_CHANNEL_ID).catch(() => null);
+            if (!panelChannel?.isTextBased()) {
+                await i.editReply({ content: "❌ Канал общей панели портфелей не найден." });
+                return;
+            }
+
+            await ensurePortfolioAdminPanelAccess(i.guild);
+            const panelContainer = await buildSharedPortfolioPanelContainer(i.guild, 0);
+            await panelChannel.send({
+                components: [panelContainer],
+                flags: MessageFlags.IsComponentsV2,
+                allowedMentions: { parse: [] }
+            });
+            await i.editReply({ content: "✅ Общая панель портфелей отправлена." });
+            return;
+        }
+
+        if (i.isButton() && (i.customId.startsWith("portfolio_shared_prev_") || i.customId.startsWith("portfolio_shared_next_"))) {
+            if (!hasPortfolioAdminAccess(i)) {
+                await i.reply({ content: "❌ У вас нет доступа к этой панели.", flags: MessageFlags.Ephemeral }).catch(() => null);
+                return;
+            }
+
+            try {
+                await i.deferUpdate();
+                const direction = i.customId.startsWith("portfolio_shared_next_") ? 1 : -1;
+                const currentPage = Number(i.customId.split("_").pop()) || 0;
+                const panelContainer = await buildSharedPortfolioPanelContainer(i.guild, currentPage + direction);
+                await i.message.edit({
+                    components: [panelContainer],
+                    flags: MessageFlags.IsComponentsV2,
+                    allowedMentions: { parse: [] }
+                });
+            } catch (error) {
+                if (error?.code !== 10062 && error?.code !== 10008) {
+                    console.error("[PORTFOLIO PANEL ERROR]", error);
+                }
+            }
+            return;
+        }
+
+        if (i.isStringSelectMenu() && i.customId.startsWith("portfolio_shared_select_")) {
+            await i.deferReply({ flags: MessageFlags.Ephemeral });
+
+            if (!hasPortfolioAdminAccess(i)) {
+                await i.editReply({ content: "❌ У вас нет доступа к панели портфелей." });
+                return;
+            }
+
+            const userId = i.values[0];
+            const portfolioChannel = await findPersonalReportChannel(i.guild, userId, true);
+            if (!portfolioChannel) {
+                await i.editReply({ content: "❌ Портфель пользователя не найден." });
+                return;
+            }
+
+            const targetMember = await i.guild.members.fetch(userId).catch(() => null);
+            const displayName = portfolioBaseChannelName(targetMember) || portfolioChannel.name.replace(/^└\\s*/, "");
+            const selectedContainer = buildSharedPortfolioSelectionContainer(i.guild, userId, displayName, portfolioChannel);
+            await i.editReply({
+                components: [selectedContainer],
+                flags: MessageFlags.IsComponentsV2,
+                allowedMentions: { parse: [] }
+            });
+            return;
+        }
+
+        if (i.isButton() && (i.customId.startsWith("portfolio_shared_reward_rp_") || i.customId.startsWith("portfolio_shared_reward_capt_"))) {
             await i.deferReply({ flags: MessageFlags.Ephemeral });
 
             if (!hasPortfolioAdminAccess(i)) {
@@ -3784,8 +3862,9 @@ Main состав — основа нашей семьи. Здесь играю�
                 return;
             }
 
-            const isCapt = i.customId.startsWith("portfolio_reward_capt_");
-            const userId = i.customId.replace(isCapt ? "portfolio_reward_capt_" : "portfolio_reward_rp_", "");
+            const isCapt = i.customId.startsWith("portfolio_shared_reward_capt_");
+            const prefix = isCapt ? "portfolio_shared_reward_capt_" : "portfolio_shared_reward_rp_";
+            const userId = i.customId.replace(prefix, "");
             const points = isCapt ? PORTFOLIO_REWARD_CAPT_POINTS : PORTFOLIO_REWARD_RP_POINTS;
             const reason = isCapt ? "Капт" : "РП отчёт";
             const targetMember = await i.guild.members.fetch(userId).catch(() => null);
@@ -3804,15 +3883,9 @@ Main состав — основа нашей семьи. Здесь играю�
                 ts: Math.floor(Date.now() / 1000)
             });
             await saveDB(salary);
-
             await i.editReply({
-                content: `✅ Владельцу портфеля <@${userId}> начислено **+${points}** ${points === 1 ? "балл" : "балла"} за **${reason}**.\nВсего МП-баллов: **${fmtPoints(salary.mpPoints[userId])}**`
+                content: `✅ Владельцу портфеля <@${userId}> начислено **+${points}** ${points === 1 ? "балл" : "балла"} за **${reason}**.\\nВсего МП-баллов: **${fmtPoints(salary.mpPoints[userId])}**`
             });
-
-            await i.channel.send({
-                content: `✅ <@${i.user.id}> выдал <@${userId}> **+${points}** ${points === 1 ? "балл" : "балла"} за **${reason}**.`,
-                allowedMentions: { parse: [] }
-            }).catch(() => null);
             return;
         }
 
@@ -5194,11 +5267,12 @@ const PERSONAL_REPORT_HIGH_RANK_ROLE_ID = "1458484199735689299";
 const PERSONAL_REPORT_TOPIC_PREFIX = "darkness-personal-report:";
 const PORTFOLIO_TOPIC_PREFIX = "portfolio_";
 const PERSONAL_REPORT_FORUM_ID = "1543149973044990062"; // legacy forum, migration source only
-const PORTFOLIO_ADMIN_TOPIC_PREFIX = "darkness-portfolio-admin:";
 const PORTFOLIO_CATEGORY_NAME = "Портфели";
 const PORTFOLIO_ARCHIVE_CATEGORY_NAME = "Архив портфелей";
 const DISCORD_CATEGORY_CHANNEL_LIMIT = 50;
-const PORTFOLIO_REWARD_RP_POINTS = 3;
+const PORTFOLIO_ADMIN_PANEL_CHANNEL_ID = "1543204225197154396";
+const PORTFOLIO_ADMIN_PAGE_SIZE = 25;
+const PORTFOLIO_REWARD_RP_POINTS = 3
 const PORTFOLIO_REWARD_CAPT_POINTS = 5;
 
 function personalReportNoticePayload({ userId, title, message, color = 0xE74C3C, mentionHighRank = true }) {
@@ -5359,7 +5433,7 @@ async function createPrivatePortfolioChannel(member, topicPrefix = PORTFOLIO_TOP
     const guild = member?.guild;
     if (!guild || guild.id !== "1458190222042075251") return null;
 
-    const category = await getAvailablePortfolioCategory(guild, "active", 2);
+    const category = await getAvailablePortfolioCategory(guild, "active", 1);
     if (!category) return null;
 
     const permissionOverwrites = [
@@ -5392,201 +5466,6 @@ async function createPrivatePortfolioChannel(member, topicPrefix = PORTFOLIO_TOP
     }
 
     return channel;
-}
-
-function portfolioAdminChannelName(member) {
-    return `┌ Админ ${portfolioBaseChannelName(member)}`.slice(0, 100);
-}
-
-async function findPortfolioAdminChannel(guild, userId, refresh = false) {
-    if (!guild || guild.id !== "1458190222042075251") return null;
-    if (refresh) await guild.channels.fetch().catch(() => null);
-
-    return guild.channels.cache.find(channel =>
-        channel.type === ChannelType.GuildText &&
-        String(channel.topic || "") === `${PORTFOLIO_ADMIN_TOPIC_PREFIX}${userId}`
-    ) || null;
-}
-
-function buildPortfolioAdminContainer(userId, displayName) {
-    const rewardRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-            .setCustomId(`portfolio_reward_rp_${userId}`)
-            .setLabel(`Выдать +${PORTFOLIO_REWARD_RP_POINTS} за РП отчёт`)
-            .setEmoji("📋")
-            .setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder()
-            .setCustomId(`portfolio_reward_capt_${userId}`)
-            .setLabel(`Выдать +${PORTFOLIO_REWARD_CAPT_POINTS} за капт`)
-            .setEmoji("⚔️")
-            .setStyle(ButtonStyle.Secondary)
-    );
-
-    return new ContainerBuilder()
-        .setAccentColor(0x2B2D31)
-        .addTextDisplayComponents(new TextDisplayBuilder().setContent(
-            `## Админ-портфель: ${displayName}`
-        ))
-        .addSeparatorComponents(new SeparatorBuilder())
-        .addTextDisplayComponents(new TextDisplayBuilder().setContent(
-            `Используйте кнопки ниже, чтобы начислить баллы владельцу портфеля.\n\n` +
-            `• 📋 РП отчёт — **+${PORTFOLIO_REWARD_RP_POINTS} балла**\n` +
-            `• ⚔️ Капт — **+${PORTFOLIO_REWARD_CAPT_POINTS} баллов**`
-        ))
-        .addSeparatorComponents(new SeparatorBuilder())
-        .addActionRowComponents(rewardRow);
-}
-
-async function ensurePortfolioAdminChannel(member, portfolioChannel) {
-    if (!member?.guild || !portfolioChannel) return null;
-    const guild = member.guild;
-    let adminChannel = await findPortfolioAdminChannel(guild, member.id, true);
-    let pairCategory = guild.channels.cache.get(portfolioChannel.parentId);
-
-    // В категории должны помещаться оба канала пары.
-    const needsAdminSlot = !adminChannel || adminChannel.parentId !== portfolioChannel.parentId;
-    if (needsAdminSlot && (!pairCategory || (pairCategory.children?.cache?.size || 0) >= DISCORD_CATEGORY_CHANNEL_LIMIT)) {
-        const categoryType = isArchivePortfolioCategory(guild, portfolioChannel.parentId) ? "archive" : "active";
-        pairCategory = await getAvailablePortfolioCategory(guild, categoryType, 2);
-        if (!pairCategory) return null;
-
-        if (portfolioChannel.parentId !== pairCategory.id) {
-            await portfolioChannel.setParent(pairCategory.id, { lockPermissions: false }).catch(() => null);
-        }
-        if (adminChannel && adminChannel.parentId !== pairCategory.id) {
-            await adminChannel.setParent(pairCategory.id, { lockPermissions: false }).catch(() => null);
-        }
-    }
-
-    if (!pairCategory) pairCategory = guild.channels.cache.get(portfolioChannel.parentId);
-    if (!pairCategory) return null;
-
-    if (!adminChannel) {
-        const permissionOverwrites = [
-            { id: guild.id, deny: ["ViewChannel"] },
-            { id: PERSONAL_REPORT_VIEW_ROLE_ID, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory"] },
-            { id: PERSONAL_REPORT_HIGH_RANK_ROLE_ID, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory"] },
-            { id: client.user.id, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory", "ManageChannels", "ManageMessages"] }
-        ];
-
-        adminChannel = await guild.channels.create({
-            name: portfolioAdminChannelName(member),
-            type: ChannelType.GuildText,
-            parent: pairCategory.id,
-            topic: `${PORTFOLIO_ADMIN_TOPIC_PREFIX}${member.id}`,
-            permissionOverwrites
-        }).catch(error => {
-            console.error("[PORTFOLIO ADMIN CHANNEL CREATE ERROR]", error);
-            return null;
-        });
-    }
-
-    if (!adminChannel) return null;
-
-    if (adminChannel.name !== portfolioAdminChannelName(member)) {
-        await adminChannel.setName(portfolioAdminChannelName(member)).catch(() => null);
-    }
-    if (adminChannel.parentId !== portfolioChannel.parentId) {
-        await adminChannel.setParent(portfolioChannel.parentId, { lockPermissions: false }).catch(() => null);
-    }
-
-    await adminChannel.permissionOverwrites.edit(guild.id, { ViewChannel: false }).catch(() => null);
-    await adminChannel.permissionOverwrites.edit(PERSONAL_REPORT_VIEW_ROLE_ID, {
-        ViewChannel: true,
-        SendMessages: true,
-        ReadMessageHistory: true
-    }).catch(() => null);
-    await adminChannel.permissionOverwrites.edit(PERSONAL_REPORT_HIGH_RANK_ROLE_ID, {
-        ViewChannel: true,
-        SendMessages: true,
-        ReadMessageHistory: true
-    }).catch(() => null);
-    await adminChannel.permissionOverwrites.edit(client.user.id, {
-        ViewChannel: true,
-        SendMessages: true,
-        ReadMessageHistory: true,
-        ManageChannels: true,
-        ManageMessages: true
-    }).catch(() => null);
-
-    // Оба канала находятся в одной категории, админский — непосредственно выше портфеля.
-    if (adminChannel.parentId === portfolioChannel.parentId) {
-        await adminChannel.setPosition(Math.max(0, portfolioChannel.rawPosition)).catch(() => null);
-    }
-
-    const messages = await adminChannel.messages.fetch({ limit: 50 }).catch(() => null);
-    const hasPanel = messages?.some(message =>
-        message.author?.id === client.user.id &&
-        componentsContainText(message.components, "Используйте кнопки ниже")
-    );
-    if (!hasPanel) {
-        await adminChannel.send({
-            components: [buildPortfolioAdminContainer(member.id, portfolioBaseChannelName(member))],
-            flags: MessageFlags.IsComponentsV2,
-            allowedMentions: { parse: [] }
-        }).catch(() => null);
-    }
-
-    return adminChannel;
-}
-
-async function ensurePrivatePortfolioChannel(member, { restoreFromArchive = false } = {}) {
-    const guild = member?.guild;
-    if (!guild || guild.id !== "1458190222042075251") return { channel: null, created: false };
-
-    let channel = await findPersonalReportChannel(guild, member.id, true);
-    let created = false;
-    if (!channel) {
-        channel = await createPrivatePortfolioChannel(member);
-        created = !!channel;
-    }
-
-    if (!channel) return { channel: null, created: false };
-
-    const isInArchive = isArchivePortfolioCategory(guild, channel.parentId);
-    const shouldRestore = restoreFromArchive || !isInArchive;
-    const activeCategory = shouldRestore
-        ? await getAvailablePortfolioCategory(guild, "active", 2)
-        : null;
-
-    if (shouldRestore && activeCategory && channel.parentId !== activeCategory.id) {
-        await channel.setParent(activeCategory.id, { lockPermissions: false }).catch(() => null);
-    }
-
-    if (channel.name !== personalReportChannelName(member)) {
-        await channel.setName(personalReportChannelName(member)).catch(() => null);
-    }
-
-    if (shouldRestore) {
-        await channel.permissionOverwrites.edit(member.id, {
-            ViewChannel: true,
-            SendMessages: true,
-            ReadMessageHistory: true,
-            AttachFiles: true
-        }).catch(() => null);
-    }
-    await channel.permissionOverwrites.edit(PERSONAL_REPORT_VIEW_ROLE_ID, {
-        ViewChannel: true,
-        ReadMessageHistory: true
-    }).catch(() => null);
-    await channel.permissionOverwrites.edit(PERSONAL_REPORT_HIGH_RANK_ROLE_ID, {
-        ViewChannel: true,
-        SendMessages: true,
-        ReadMessageHistory: true
-    }).catch(() => null);
-
-    const adminChannel = await ensurePortfolioAdminChannel(member, channel);
-    if (adminChannel && adminChannel.parentId !== channel.parentId) {
-        await adminChannel.setParent(channel.parentId, { lockPermissions: false }).catch(() => null);
-    }
-    await alignPortfolioChannelPairs(guild);
-
-    return { channel, adminChannel, created };
-}
-
-async function ensurePersonalReportChannel(member) {
-    const result = await ensurePrivatePortfolioChannel(member, { restoreFromArchive: true });
-    return result.channel;
 }
 
 function componentsContainText(components, text) {
@@ -5628,13 +5507,9 @@ async function notifyPersonalReportRoleLost(guild, userId, reason) {
         mentionHighRank: true
     })).catch(() => null);
 
-    const adminChannel = await findPortfolioAdminChannel(guild, userId, true);
-    const archiveCategory = await getAvailablePortfolioCategory(guild, "archive", 2);
+    const archiveCategory = await getAvailablePortfolioCategory(guild, "archive", 1);
     if (archiveCategory && channel.parentId !== archiveCategory.id) {
         await channel.setParent(archiveCategory.id, { lockPermissions: false }).catch(() => null);
-    }
-    if (adminChannel && archiveCategory && adminChannel.parentId !== archiveCategory.id) {
-        await adminChannel.setParent(archiveCategory.id, { lockPermissions: false }).catch(() => null);
     }
     await channel.permissionOverwrites.delete(userId).catch(() => null);
 }
@@ -5662,16 +5537,11 @@ async function migrateForumPortfoliosToChannels(guild) {
             if (!member) continue;
             channel = await createPrivatePortfolioChannel(member);
             if (!channel) continue;
-            await ensurePortfolioAdminChannel(member, channel);
 
             if (thread.archived) {
-                const archiveCategory = await getAvailablePortfolioCategory(guild, "archive", 2);
-                const adminChannel = await findPortfolioAdminChannel(guild, userId, true);
+                const archiveCategory = await getAvailablePortfolioCategory(guild, "archive", 1);
                 if (archiveCategory) {
                     await channel.setParent(archiveCategory.id, { lockPermissions: false }).catch(() => null);
-                    if (adminChannel && adminChannel.parentId !== archiveCategory.id) {
-                        await adminChannel.setParent(archiveCategory.id, { lockPermissions: false }).catch(() => null);
-                    }
                 }
                 await channel.permissionOverwrites.delete(userId).catch(() => null);
             }
@@ -5723,7 +5593,7 @@ async function restoreLegacyPortfolioChannels(guild) {
         const userId = extractPortfolioUserId(channel.topic);
         const member = await guild.members.fetch(userId).catch(() => null);
         const hasPortfolioRole = Boolean(member?.roles.cache.has(PERSONAL_REPORT_ROLE_ID));
-        const targetCategory = await getAvailablePortfolioCategory(guild, hasPortfolioRole ? "active" : "archive", 2);
+        const targetCategory = await getAvailablePortfolioCategory(guild, hasPortfolioRole ? "active" : "archive", 1);
 
         if (targetCategory && channel.parentId !== targetCategory.id) {
             await channel.setParent(targetCategory.id, { lockPermissions: false }).catch(() => null);
@@ -5750,76 +5620,6 @@ async function restoreLegacyPortfolioChannels(guild) {
             await channel.permissionOverwrites.delete(userId).catch(() => null);
         }
 
-        if (member) await ensurePortfolioAdminChannel(member, channel);
-    }
-}
-
-async function alignPortfolioChannelPairs(guild) {
-    if (!guild || guild.id !== "1458190222042075251") return;
-    await guild.channels.fetch().catch(() => null);
-
-    const categories = guild.channels.cache.filter(channel =>
-        channel.type === ChannelType.GuildCategory && portfolioCategoryIds(guild).includes(channel.id)
-    );
-
-    for (const category of categories.values()) {
-        const children = [...guild.channels.cache.values()]
-            .filter(channel => channel.type === ChannelType.GuildText && channel.parentId === category.id)
-            .sort((a, b) => a.position - b.position);
-        if (children.length < 2) continue;
-
-        const portfolios = new Map();
-        const admins = new Map();
-        for (const channel of children) {
-            const portfolioUserId = extractPortfolioUserId(channel.topic);
-            const adminTopic = String(channel.topic || "");
-            if (portfolioUserId) portfolios.set(portfolioUserId, channel);
-            if (adminTopic.startsWith(PORTFOLIO_ADMIN_TOPIC_PREFIX)) {
-                admins.set(adminTopic.replace(PORTFOLIO_ADMIN_TOPIC_PREFIX, ""), channel);
-            }
-        }
-
-        const pairs = [...portfolios.keys()]
-            .filter(userId => admins.has(userId))
-            .map(userId => ({
-                userId,
-                portfolio: portfolios.get(userId),
-                admin: admins.get(userId)
-            }))
-            .sort((a, b) => a.portfolio.name.localeCompare(b.portfolio.name));
-        if (!pairs.length) continue;
-
-        // Ставим каждый админский канал непосредственно перед его портфелем.
-        // Делаем два прохода, чтобы Discord успел пересчитать позиции после перемещений.
-        for (let pass = 0; pass < 2; pass++) {
-            for (const pair of pairs) {
-                await pair.admin.setPosition(pair.portfolio.rawPosition).catch(error => {
-                    console.error(`[PORTFOLIO ALIGN ERROR] ${pair.userId}`, error);
-                });
-            }
-        }
-    }
-}
-
-async function ensureAllPortfolioAdminChannels(guild) {
-    if (!guild || guild.id !== "1458190222042075251") return;
-    await guild.channels.fetch().catch(() => null);
-
-    const portfolioChannels = guild.channels.cache.filter(channel =>
-        channel.type === ChannelType.GuildText &&
-        portfolioCategoryIds(guild).includes(channel.parentId) &&
-        extractPortfolioUserId(channel.topic)
-    );
-
-    for (const channel of portfolioChannels.values()) {
-        const userId = extractPortfolioUserId(channel.topic);
-        const member = await guild.members.fetch(userId).catch(() => null);
-        if (!member) continue;
-
-        if (channel.name !== personalReportChannelName(member)) {
-            await channel.setName(personalReportChannelName(member)).catch(() => null);
-        }
-        await ensurePortfolioAdminChannel(member, channel);
     }
 }
 
@@ -5871,6 +5671,120 @@ async function initPersonalReportChannels(guild) {
             await ensurePersonalReportChannel(member);
         }
     }
+}
+
+async function listSharedPortfolioChannels(guild) {
+    await guild.channels.fetch().catch(() => null);
+    const channels = guild.channels.cache.filter(channel =>
+        channel.type === ChannelType.GuildText &&
+        extractPortfolioUserId(channel.topic)
+    );
+
+    return [...new Map(
+        channels.map(channel => [extractPortfolioUserId(channel.topic), channel])
+    ).values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function ensurePortfolioAdminPanelAccess(guild) {
+    const panelChannel = await guild.channels.fetch(PORTFOLIO_ADMIN_PANEL_CHANNEL_ID).catch(() => null);
+    if (!panelChannel?.permissionOverwrites) return;
+
+    await panelChannel.permissionOverwrites.edit(guild.id, { ViewChannel: false }).catch(() => null);
+    await panelChannel.permissionOverwrites.edit(PERSONAL_REPORT_VIEW_ROLE_ID, {
+        ViewChannel: true,
+        ReadMessageHistory: true
+    }).catch(() => null);
+    await panelChannel.permissionOverwrites.edit(PERSONAL_REPORT_HIGH_RANK_ROLE_ID, {
+        ViewChannel: true,
+        SendMessages: true,
+        ReadMessageHistory: true
+    }).catch(() => null);
+    await panelChannel.permissionOverwrites.edit(client.user.id, {
+        ViewChannel: true,
+        SendMessages: true,
+        ReadMessageHistory: true,
+        ManageMessages: true
+    }).catch(() => null);
+}
+
+async function buildSharedPortfolioPanelContainer(guild, requestedPage = 0) {
+    const channels = await listSharedPortfolioChannels(guild);
+    const totalPages = Math.max(1, Math.ceil(channels.length / PORTFOLIO_ADMIN_PAGE_SIZE));
+    const page = Math.min(Math.max(Number(requestedPage) || 0, 0), totalPages - 1);
+    const pageChannels = channels.slice(page * PORTFOLIO_ADMIN_PAGE_SIZE, (page + 1) * PORTFOLIO_ADMIN_PAGE_SIZE);
+
+    const container = new ContainerBuilder()
+        .setAccentColor(0x2B2D31)
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(
+            `# Админ-панель портфелей\n-# Выберите пользователя, чтобы открыть управление\n-# Страница ${page + 1} из ${totalPages}`
+        ))
+        .addSeparatorComponents(new SeparatorBuilder());
+
+    if (!pageChannels.length) {
+        container.addTextDisplayComponents(new TextDisplayBuilder().setContent("*Портфелей пока нет.*"));
+    } else {
+        const select = new StringSelectMenuBuilder()
+            .setCustomId(`portfolio_shared_select_${page}`)
+            .setPlaceholder("Выберите пользователя")
+            .setMinValues(1)
+            .setMaxValues(1)
+            .addOptions(pageChannels.map(channel => ({
+                label: channel.name.replace(/^└\s*/, "").slice(0, 100),
+                description: "Открыть управление портфелем",
+                value: extractPortfolioUserId(channel.topic)
+            })));
+        container.addActionRowComponents(new ActionRowBuilder().addComponents(select));
+    }
+
+    if (totalPages > 1) {
+        const navigationRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`portfolio_shared_prev_${page}`)
+                .setLabel("Назад")
+                .setStyle(ButtonStyle.Secondary)
+                .setDisabled(page === 0),
+            new ButtonBuilder()
+                .setCustomId(`portfolio_shared_next_${page}`)
+                .setLabel("Далее")
+                .setStyle(ButtonStyle.Secondary)
+                .setDisabled(page >= totalPages - 1)
+        );
+        container.addSeparatorComponents(new SeparatorBuilder()).addActionRowComponents(navigationRow);
+    }
+
+    return container;
+}
+
+function buildSharedPortfolioSelectionContainer(guild, userId, displayName, portfolioChannel) {
+    const actionRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setLabel("Открыть портфель")
+            .setStyle(ButtonStyle.Link)
+            .setURL(`https://discord.com/channels/${guild.id}/${portfolioChannel.id}`),
+        new ButtonBuilder()
+            .setCustomId(`portfolio_shared_reward_rp_${userId}`)
+            .setLabel(`Выдать +${PORTFOLIO_REWARD_RP_POINTS} за РП отчёт`)
+            .setEmoji("📋")
+            .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+            .setCustomId(`portfolio_shared_reward_capt_${userId}`)
+            .setLabel(`Выдать +${PORTFOLIO_REWARD_CAPT_POINTS} за капт`)
+            .setEmoji("⚔️")
+            .setStyle(ButtonStyle.Secondary)
+    );
+
+    return new ContainerBuilder()
+        .setAccentColor(0x2B2D31)
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(
+            `## Портфель: ${displayName}`
+        ))
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(
+            `**Канал:** <#${portfolioChannel.id}>\n\n` +
+            `Выберите действие для владельца портфеля.`
+        ))
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addActionRowComponents(actionRow);
 }
 
 function hasPortfolioAdminAccess(interaction) {
