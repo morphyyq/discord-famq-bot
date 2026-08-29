@@ -5789,16 +5789,15 @@ async function alignPortfolioChannelPairs(guild) {
             .sort((a, b) => a.portfolio.name.localeCompare(b.portfolio.name));
         if (!pairs.length) continue;
 
-        const pairedIds = new Set(pairs.flatMap(pair => [pair.portfolio.id, pair.admin.id]));
-        const unpaired = children.filter(channel => !pairedIds.has(channel.id));
-        const ordered = [...pairs.flatMap(pair => [pair.admin, pair.portfolio]), ...unpaired];
-        const positions = children.map(channel => channel.position).sort((a, b) => a - b);
-
-        await guild.channels.setPositions(
-            ordered.map((channel, index) => ({ channel: channel.id, position: positions[index] }))
-        ).catch(error => {
-            console.error(`[PORTFOLIO ALIGN ERROR] ${category.id}`, error);
-        });
+        // Ставим каждый админский канал непосредственно перед его портфелем.
+        // Делаем два прохода, чтобы Discord успел пересчитать позиции после перемещений.
+        for (let pass = 0; pass < 2; pass++) {
+            for (const pair of pairs) {
+                await pair.admin.setPosition(pair.portfolio.rawPosition).catch(error => {
+                    console.error(`[PORTFOLIO ALIGN ERROR] ${pair.userId}`, error);
+                });
+            }
+        }
     }
 }
 
