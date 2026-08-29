@@ -5200,7 +5200,18 @@ const PERSONAL_REPORT_TOPIC_PREFIX = "darkness-personal-report:";
 const PORTFOLIO_TOPIC_PREFIX = "portfolio_";
 const PERSONAL_REPORT_FORUM_ID = "1543149973044990062"; // legacy forum, migration source only
 const PORTFOLIO_ADMIN_PANEL_CHANNEL_ID = "1543177207843913798";
-const PORTFOLIO_ADMIN_PAGE_SIZE = 20;
+const PORTFOLIO_ADMIN_PAGE_SIZE = 15;
+const PORTFOLIO_TIER_ROLES = {
+    A: "1541151892309278811",
+    B: "1541151934944125019",
+    C: "1541151978631995453"
+};
+const PORTFOLIO_TIER_ORDER = [
+    { key: "A", title: "Тир A · лучший", description: "Самый высокий уровень" },
+    { key: "B", title: "Тир B · средний", description: "Средний уровень" },
+    { key: "C", title: "Тир C · базовый", description: "Базовый уровень" },
+    { key: "none", title: "Без тира", description: "Роль тира ещё не выдана" }
+];
 
 function personalReportNoticePayload({ userId, title, message, color = 0xE74C3C, mentionHighRank = true }) {
     const container = new ContainerBuilder()
@@ -5565,6 +5576,13 @@ function hasPortfolioAdminAccess(interaction) {
     );
 }
 
+function getPortfolioTier(member) {
+    if (member?.roles?.cache?.has(PORTFOLIO_TIER_ROLES.A)) return "A";
+    if (member?.roles?.cache?.has(PORTFOLIO_TIER_ROLES.B)) return "B";
+    if (member?.roles?.cache?.has(PORTFOLIO_TIER_ROLES.C)) return "C";
+    return "none";
+}
+
 async function listPortfolioChannels(guild) {
     await guild.channels.fetch().catch(() => null);
     const channels = guild.channels.cache.filter(channel =>
@@ -5573,9 +5591,19 @@ async function listPortfolioChannels(guild) {
         extractPortfolioUserId(channel.topic)
     );
 
-    return [...new Map(
+    const uniqueChannels = [...new Map(
         channels.map(channel => [extractPortfolioUserId(channel.topic), channel])
-    ).values()].sort((a, b) => a.name.localeCompare(b.name));
+    ).values()];
+
+    return Promise.all(uniqueChannels.map(async channel => {
+        const userId = extractPortfolioUserId(channel.topic);
+        const member = await guild.members.fetch(userId).catch(() => null);
+        return {
+            channel,
+            userId,
+            tier: getPortfolioTier(member)
+        };
+    }));
 }
 
 async function ensurePortfolioAdminPanelAccess(guild) {
@@ -5601,10 +5629,10 @@ async function ensurePortfolioAdminPanelAccess(guild) {
 }
 
 async function buildPortfolioAdminPanelContainer(guild, requestedPage = 0) {
-    const channels = await listPortfolioChannels(guild);
-    const totalPages = Math.max(1, Math.ceil(channels.length / PORTFOLIO_ADMIN_PAGE_SIZE));
+    const portfolios = await listPortfolioChannels(guild);
+    const totalPages = Math.max(1, Math.ceil(portfolios.length / PORTFOLIO_ADMIN_PAGE_SIZE));
     const page = Math.min(Math.max(Number(requestedPage) || 0, 0), totalPages - 1);
-    const pageChannels = channels.slice(page * PORTFOLIO_ADMIN_PAGE_SIZE, (page + 1) * PORTFOLIO_ADMIN_PAGE_SIZE);
+    const pagePortfolios = portfolios.slice(page * PORTFOLIO_ADMIN_PAGE_SIZE, (page + 1) * PORTFOLIO_ADMIN_PAGE_SIZE);
 
     const container = new ContainerBuilder()
         .setAccentColor(0x2B2D31)
@@ -5613,19 +5641,28 @@ async function buildPortfolioAdminPanelContainer(guild, requestedPage = 0) {
         ))
         .addSeparatorComponents(new SeparatorBuilder());
 
-    if (!pageChannels.length) {
+    if (!pagePortfolios.length) {
         container.addTextDisplayComponents(new TextDisplayBuilder().setContent("*Портфелей пока нет.*"));
     } else {
-        for (let index = 0; index < pageChannels.length; index += 5) {
-            const row = new ActionRowBuilder().addComponents(
-                ...pageChannels.slice(index, index + 5).map(channel =>
-                    new ButtonBuilder()
-                        .setLabel(channel.name.slice(0, 80))
-                        .setStyle(ButtonStyle.Link)
-                        .setURL(`https://discord.com/channels/${guild.id}/${channel.id}`)
-                )
-            );
-            container.addActionRowComponents(row);
+        for (const tier of PORTFOLIO_TIER_ORDER) {
+            const tierPortfolios = pagePortfolios.filter(item => item.tier === tier.key);
+            if (!tierPortfolios.length) continue;
+
+            container.addTextDisplayComponents(new TextDisplayBuilder().setContent(
+                `### ${tier.title}\n-# ${tier.description} · ${tierPortfolios.length}`
+            ));
+
+            for (let index = 0; index < tierPortfolios.length; index += 5) {
+                const row = new ActionRowBuilder().addComponents(
+                    ...tierPortfolios.slice(index, index + 5).map(({ channel }) =>
+                        new ButtonBuilder()
+                            .setLabel(channel.name.slice(0, 80))
+                            .setStyle(ButtonStyle.Link)
+                            .setURL(`https://discord.com/channels/${guild.id}/${channel.id}`)
+                    )
+                );
+                container.addActionRowComponents(row);
+            }
         }
     }
 
