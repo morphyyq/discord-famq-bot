@@ -1179,7 +1179,8 @@ client.once(Events.ClientReady, async () => {
         await updateOnlineMonitor();
         await updateAFKEmbed(mainGuild);
         await ensureAllLogThreads(mainGuild);
-        await ensurePersonalReportCategoryAccess(mainGuild);
+        await ensurePersonalReportForumAccess(mainGuild);
+        await migrateLegacyPortfolioChannels(mainGuild);
         await initPersonalReportChannels(mainGuild);
         await initVoiceSessions(mainGuild);
     }
@@ -2051,7 +2052,7 @@ client.on(Events.InteractionCreate, async (i) => {
                 if (!config) return;
                 const hasPermission = config.ALLOWED_ROLES && config.ALLOWED_ROLES.some(role => i.member.roles.cache.has(role));
                 if (!hasPermission) {
-                    await i.reply({ content: "❌ Вы не имеете доступа к управлению этой командой.", ephemeral: true });
+                    await i.reply({ content: "❌ Вы не имеете доступа к управлению этой командой.", flags: MessageFlags.Ephemeral });
                     return;
                 }
             }
@@ -2062,7 +2063,7 @@ client.on(Events.InteractionCreate, async (i) => {
                     content: stopped
                         ? "🛑 Удаление сообщений остановлено. Уже удалённые сообщения вернуть нельзя."
                         : "ℹ️ Сейчас удаление сообщений не выполняется.",
-                    ephemeral: true
+                    flags: MessageFlags.Ephemeral
                 });
                 return;
             }
@@ -2073,7 +2074,7 @@ client.on(Events.InteractionCreate, async (i) => {
                     content: stopped
                         ? "🛑 Массовая выдача роли остановлена. Уже выданные роли автоматически не снимутся."
                         : "ℹ️ Сейчас массовая выдача роли не выполняется.",
-                    ephemeral: true
+                    flags: MessageFlags.Ephemeral
                 });
                 return;
             }
@@ -2084,7 +2085,7 @@ client.on(Events.InteractionCreate, async (i) => {
                     content: stopped
                         ? "🛑 Снятие ролей остановлено. Уже снятые роли автоматически не вернутся."
                         : "ℹ️ Сейчас массовое снятие ролей не выполняется.",
-                    ephemeral: true
+                    flags: MessageFlags.Ephemeral
                 });
                 return;
             }
@@ -2092,11 +2093,11 @@ client.on(Events.InteractionCreate, async (i) => {
             if (i.commandName === "add_role_all") {
                 const job = beginCleanupJob(i.guild.id, "add_role");
                 if (!job) {
-                    await i.reply({ content: "⚠️ Массовая выдача роли уже выполняется. Для остановки используйте `/add_role_all_stop`.", ephemeral: true });
+                    await i.reply({ content: "⚠️ Массовая выдача роли уже выполняется. Для остановки используйте `/add_role_all_stop`.", flags: MessageFlags.Ephemeral });
                     return;
                 }
 
-                await i.deferReply({ ephemeral: true });
+                await i.deferReply({ flags: MessageFlags.Ephemeral });
                 try {
                     const result = await addRoleToAllMembers(i.guild, job);
                     await i.editReply({
@@ -2118,10 +2119,10 @@ client.on(Events.InteractionCreate, async (i) => {
             if (i.commandName === "clear_roles") {
                 const job = beginCleanupJob(i.guild.id, "roles");
                 if (!job) {
-                    await i.reply({ content: "⚠️ Снятие ролей уже выполняется. Для остановки используйте `/clear_roles_stop`.", ephemeral: true });
+                    await i.reply({ content: "⚠️ Снятие ролей уже выполняется. Для остановки используйте `/clear_roles_stop`.", flags: MessageFlags.Ephemeral });
                     return;
                 }
-                await i.deferReply({ ephemeral: true });
+                await i.deferReply({ flags: MessageFlags.Ephemeral });
                 try {
                     const result = await clearRolesFromAllHumanMembers(i.guild, job);
                     await i.editReply({
@@ -2146,21 +2147,21 @@ client.on(Events.InteractionCreate, async (i) => {
                 const amount = Number.parseInt(rawAmount, 10);
 
                 if (!isAll && (!Number.isInteger(amount) || amount < 1 || amount > 10000)) {
-                    await i.reply({ content: "❌ Укажите число от **1** до **10000** или значение **all**.", ephemeral: true });
+                    await i.reply({ content: "❌ Укажите число от **1** до **10000** или значение **all**.", flags: MessageFlags.Ephemeral });
                     return;
                 }
                 if (!i.channel?.messages) {
-                    await i.reply({ content: "❌ В этом канале нельзя удалять сообщения.", ephemeral: true });
+                    await i.reply({ content: "❌ В этом канале нельзя удалять сообщения.", flags: MessageFlags.Ephemeral });
                     return;
                 }
 
                 const job = beginCleanupJob(i.guild.id, "messages");
                 if (!job) {
-                    await i.reply({ content: "⚠️ Удаление сообщений уже выполняется. Для остановки используйте `/clear_stop`.", ephemeral: true });
+                    await i.reply({ content: "⚠️ Удаление сообщений уже выполняется. Для остановки используйте `/clear_stop`.", flags: MessageFlags.Ephemeral });
                     return;
                 }
 
-                await i.deferReply({ ephemeral: true });
+                await i.deferReply({ flags: MessageFlags.Ephemeral });
                 try {
                     const result = await clearChannelMessages(i.channel, isAll ? "all" : amount, job);
                     await i.editReply({
@@ -2200,11 +2201,11 @@ client.on(Events.InteractionCreate, async (i) => {
                         flags: MessageFlags.IsComponentsV2
                     });
                     event.messageId = message.id;
-                    await i.reply({ content: `✅ Сбор плюсов создан: ${message.url}`, ephemeral: true });
+                    await i.reply({ content: `✅ Сбор плюсов создан: ${message.url}`, flags: MessageFlags.Ephemeral });
                 } catch (error) {
                     plusEvents.delete(eventId);
                     console.error("[PLUS CREATE ERROR]", error);
-                    await i.reply({ content: "❌ Не удалось создать контейнер сбора плюсов.", ephemeral: true });
+                    await i.reply({ content: "❌ Не удалось создать контейнер сбора плюсов.", flags: MessageFlags.Ephemeral });
                 }
                 return;
             }
@@ -2212,7 +2213,7 @@ client.on(Events.InteractionCreate, async (i) => {
             if (i.commandName === "all") {
                 const textMsg = i.options.getString("text"); 
                 
-                await i.reply({ content: "⏳ Начинаю рассылку в ЛС (может занять время)...", ephemeral: true });
+                await i.reply({ content: "⏳ Начинаю рассылку в ЛС (может занять время)...", flags: MessageFlags.Ephemeral });
 
                 try {
                     await i.guild.members.fetch();
@@ -2240,7 +2241,7 @@ client.on(Events.InteractionCreate, async (i) => {
 
             if (i.commandName === "balance") {
                 const currentBal = salary.balances[i.user.id] || 0;
-                await i.reply({ content: `💰 Баланс: $${currentBal.toLocaleString()}`, ephemeral: true });
+                await i.reply({ content: `💰 Баланс: $${currentBal.toLocaleString()}`, flags: MessageFlags.Ephemeral });
                 return;
             }
 
@@ -2250,7 +2251,7 @@ client.on(Events.InteractionCreate, async (i) => {
                 salary.auditMessages = {};
                 await saveDB(salary);
                 await updateSalaryEmbed(i.guild);
-                await i.reply({ content: "✅ Все балансы и привязки игроков были полностью аннулированы!", ephemeral: true });
+                await i.reply({ content: "✅ Все балансы и привязки игроков были полностью аннулированы!", flags: MessageFlags.Ephemeral });
                 return;
             }
 
@@ -2260,7 +2261,7 @@ client.on(Events.InteractionCreate, async (i) => {
 
                 const currentBal = salary.balances[targetUser.id] || 0;
                 if (currentBal === 0) {
-                    await i.reply({ content: `❌ У <@${targetUser.id}> баланс уже **$0** — списывать нечего.`, ephemeral: true });
+                    await i.reply({ content: `❌ У <@${targetUser.id}> баланс уже **$0** — списывать нечего.`, flags: MessageFlags.Ephemeral });
                     return;
                 }
 
@@ -2271,7 +2272,7 @@ client.on(Events.InteractionCreate, async (i) => {
 
                 await i.reply({
                     content: `✅ С баланса <@${targetUser.id}> списано **$${amount.toLocaleString()}**.\nБыло: **$${currentBal.toLocaleString()}** → Стало: **$${newBal.toLocaleString()}**`,
-                    ephemeral: true
+                    flags: MessageFlags.Ephemeral
                 });
                 return;
             }
@@ -2288,7 +2289,7 @@ client.on(Events.InteractionCreate, async (i) => {
 
                 await i.reply({
                     content: `✅ Рекруту <@${targetUser.id}> начислено **$${amount.toLocaleString()}**.\nБыло: **$${currentBal.toLocaleString()}** → Стало: **$${newBal.toLocaleString()}**`,
-                    ephemeral: true
+                    flags: MessageFlags.Ephemeral
                 });
                 return;
             }
@@ -2345,7 +2346,7 @@ client.on(Events.InteractionCreate, async (i) => {
 Капт: \`+20\` WIN | \`+10\` LOSE`;
 
                 await i.channel.send({ content: mpPanelText, components: [mpMenuRow], allowedMentions: { parse: ["everyone"] } });
-                await i.reply({ content: "✅ Панель МП отчётов создана!", ephemeral: true });
+                await i.reply({ content: "✅ Панель МП отчётов создана!", flags: MessageFlags.Ephemeral });
                 return;
             }
 
@@ -2358,7 +2359,7 @@ client.on(Events.InteractionCreate, async (i) => {
                 const current = salary.mpPoints[targetUser.id] || 0;
 
                 if (current === 0) {
-                    await i.reply({ content: `❌ У <@${targetUser.id}> баллов уже **0** — снимать нечего.`, ephemeral: true });
+                    await i.reply({ content: `❌ У <@${targetUser.id}> баллов уже **0** — снимать нечего.`, flags: MessageFlags.Ephemeral });
                     return;
                 }
 
@@ -2368,7 +2369,7 @@ client.on(Events.InteractionCreate, async (i) => {
 
                 await i.reply({
                     content: `✅ С <@${targetUser.id}> снято **${amount}** МП баллов.\nБыло: **${current}** → Стало: **${newPoints}**`,
-                    ephemeral: true
+                    flags: MessageFlags.Ephemeral
                 });
                 return;
             }
@@ -2384,7 +2385,7 @@ client.on(Events.InteractionCreate, async (i) => {
 
                 await i.reply({
                     content: `✅ <@${targetUser.id}> начислено **${amount}** МП баллов.\nБыло: **${current}** → Стало: **${newPoints}**`,
-                    ephemeral: true
+                    flags: MessageFlags.Ephemeral
                 });
                 return;
             }
@@ -2406,7 +2407,7 @@ client.on(Events.InteractionCreate, async (i) => {
                     .setColor("#2b2d31")
                     .setTimestamp();
 
-                await i.reply({ embeds: [embed], ephemeral: true });
+                await i.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
                 return;
             }
 
@@ -2418,11 +2419,11 @@ client.on(Events.InteractionCreate, async (i) => {
                 const history = salary.mpHistory[targetUser.id] || [];
 
                 if (history.length === 0) {
-                    await i.reply({ content: `❌ У <@${targetUser.id}> нет ни одного принятого отчёта.`, ephemeral: true });
+                    await i.reply({ content: `❌ У <@${targetUser.id}> нет ни одного принятого отчёта.`, flags: MessageFlags.Ephemeral });
                     return;
                 }
 
-                await i.deferReply({ ephemeral: true });
+                await i.deferReply({ flags: MessageFlags.Ephemeral });
 
                 const thread = await i.channel.threads.create({
                     name: `МП скрины — ${targetUser.username}`,
@@ -2478,7 +2479,7 @@ client.on(Events.InteractionCreate, async (i) => {
                     .setColor("#2b2d31")
                     .setTimestamp();
 
-                await i.reply({ embeds: [rankEmbed], ephemeral: true });
+                await i.reply({ embeds: [rankEmbed], flags: MessageFlags.Ephemeral });
                 return;
             }
 
@@ -2487,7 +2488,7 @@ client.on(Events.InteractionCreate, async (i) => {
                 const targetMember = await i.guild.members.fetch(targetUser.id).catch(() => null);
                 
                 if (!targetMember) {
-                    await i.reply({ content: "❌ Пользователь не найден на сервере.", ephemeral: true });
+                    await i.reply({ content: "❌ Пользователь не найден на сервере.", flags: MessageFlags.Ephemeral });
                     return;
                 }
 
@@ -2511,9 +2512,9 @@ client.on(Events.InteractionCreate, async (i) => {
                             .setLabel("Посмотреть анкету заявки")
                             .setStyle(ButtonStyle.Secondary)
                     );
-                    await i.reply({ embeds: [infoEmbed], components: [row], ephemeral: true });
+                    await i.reply({ embeds: [infoEmbed], components: [row], flags: MessageFlags.Ephemeral });
                 } else {
-                    await i.reply({ embeds: [infoEmbed], ephemeral: true });
+                    await i.reply({ embeds: [infoEmbed], flags: MessageFlags.Ephemeral });
                 }
                 return;
             }
@@ -2568,7 +2569,7 @@ client.on(Events.InteractionCreate, async (i) => {
                 };
 
                 await channel.send(panelContainer);
-                await i.reply({ content: "✅ Панель успешно создана!", ephemeral: true });
+                await i.reply({ content: "✅ Панель успешно создана!", flags: MessageFlags.Ephemeral });
                 return;
             }
 
@@ -2609,7 +2610,7 @@ Main состав — основа нашей семьи. Здесь играю�
                 );
 
                 await channel.send({ embeds: [embed], components: [row] });
-                await i.reply({ content: "✅ Панель заявки в Main успешно создана!", ephemeral: true });
+                await i.reply({ content: "✅ Панель заявки в Main успешно создана!", flags: MessageFlags.Ephemeral });
                 return;
             }
 
@@ -2666,7 +2667,7 @@ Main состав — основа нашей семьи. Здесь играю�
                     components: [recruitPanelContainer],
                     flags: MessageFlags.IsComponentsV2
                 });
-                await i.reply({ content: "✅ Панель заявки в Recruit успешно создана!", ephemeral: true });
+                await i.reply({ content: "✅ Панель заявки в Recruit успешно создана!", flags: MessageFlags.Ephemeral });
                 return;
             }
 
@@ -2715,7 +2716,7 @@ Main состав — основа нашей семьи. Здесь играю�
                 );
 
                 await channel.send({ embeds: [embed], components: [row] });
-                await i.reply({ content: "✅ Широкая панель системы повышения призвана!", ephemeral: true });
+                await i.reply({ content: "✅ Широкая панель системы повышения призвана!", flags: MessageFlags.Ephemeral });
                 return;
             }
 
@@ -2723,21 +2724,21 @@ Main состав — основа нашей семьи. Здесь играю�
                 const config = SERVERS[i.guild.id];
                 const afkChannelId = config?.CHANNELS?.AFK || "1520898805103595772";
                 const channel = await i.guild.channels.fetch(afkChannelId).catch(() => null);
-                if (!channel) return i.reply({ content: "❌ Канал АФК не найден.", ephemeral: true });
+                if (!channel) return i.reply({ content: "❌ Канал АФК не найден.", flags: MessageFlags.Ephemeral });
 
                 await updateAFKEmbed(i.guild);
-                await i.reply({ content: "✅ АФК панель обновлена и отправлена в канал.", ephemeral: true });
+                await i.reply({ content: "✅ АФК панель обновлена и отправлена в канал.", flags: MessageFlags.Ephemeral });
                 return;
             }
 
             if (i.commandName === "afk_list") {
                 await updateAFKEmbed(i.guild);
-                await i.reply({ content: "✅ АФК список обновлён в канале.", ephemeral: true });
+                await i.reply({ content: "✅ АФК список обновлён в канале.", flags: MessageFlags.Ephemeral });
                 return;
             }
 
             if (i.commandName === "afk_kick") {
-                await i.deferReply({ ephemeral: true });
+                await i.deferReply({ flags: MessageFlags.Ephemeral });
 
                 const config = SERVERS[i.guild.id];
                 const hasPermission = config?.ALLOWED_ROLES?.some(role => i.member.roles.cache.has(role));
@@ -2789,14 +2790,14 @@ Main состав — основа нашей семьи. Здесь играю�
 
             if (i.commandName === "composition_panel") {
                 await updateOnlineMonitor();
-                await i.reply({ content: "✅ Панель состава обновлена и вызвана.", ephemeral: true });
+                await i.reply({ content: "✅ Панель состава обновлена и вызвана.", flags: MessageFlags.Ephemeral });
                 return;
             }
 
             if (i.commandName === "group_panel") {
                 const channel = await client.channels.fetch("1508112178610438327").catch(() => null);
                 if (!channel) {
-                    await i.reply({ content: "❌ Канал 'групп' не найден или у бота нет туда доступа.", ephemeral: true });
+                    await i.reply({ content: "❌ Канал 'групп' не найден или у бота нет туда доступа.", flags: MessageFlags.Ephemeral });
                     return;
                 }
 
@@ -2825,7 +2826,7 @@ Main состав — основа нашей семьи. Здесь играю�
                 );
 
                 await channel.send({ embeds: [embed], components: [row] });
-                await i.reply({ content: "✅ Панель сборов отправлена!", ephemeral: true });
+                await i.reply({ content: "✅ Панель сборов отправлена!", flags: MessageFlags.Ephemeral });
                 return;
             }
 
@@ -2833,7 +2834,7 @@ Main состав — основа нашей семьи. Здесь играю�
             // ПАНЕЛЬ МАГАЗИНА — контейнер с баннером и товарами
             // =====================================================
             if (i.commandName === "shop_panel") {
-                await i.deferReply({ ephemeral: true });
+                await i.deferReply({ flags: MessageFlags.Ephemeral });
 
                 const SHOP_BANNER_URL = "https://cdn.discordapp.com/attachments/1540014036081446922/1540287038916526100/ChatGPT_Image_21_._2026_._12_10_20.png?ex=6a896797&is=6a881617&hm=f27de9f632adc54a3a42da4030571f1f5f65e407d67cc15f3598e239ba33ce08&";
 
@@ -2944,7 +2945,7 @@ Main состав — основа нашей семьи. Здесь играю�
             // ПАНЕЛЬ ВЗАИМОДЕЙСТВИЯ — контейнер с баннером и кнопками
             // =====================================================
             if (i.commandName === "interaction_panel") {
-                await i.deferReply({ ephemeral: true });
+                await i.deferReply({ flags: MessageFlags.Ephemeral });
 
                 const BANNER_URL = "https://cdn.discordapp.com/attachments/1540014036081446922/1540283283227541625/ChatGPT_Image_21_._2026_._11_55_37.png?ex=6a896417&is=6a881297&hm=63ab8d52865c69d26e030f42afef6bf11c16404f12aa3a8ad79f6f84e4e2a768&";
 
@@ -3035,7 +3036,7 @@ Main состав — основа нашей семьи. Здесь играю�
 
 **Шаг 2:** Выберите результат:`,
                 components: [resultMenu],
-                ephemeral: true
+                flags: MessageFlags.Ephemeral
             });
             return;
         }
@@ -3227,7 +3228,7 @@ Main состав — основа нашей семьи. Здесь играю�
 
             const member = await i.guild.members.fetch(userId).catch(() => null);
             if (!member) {
-                await i.reply({ content: "❌ Игрок не найден на сервере.", ephemeral: true });
+                await i.reply({ content: "❌ Игрок не найден на сервере.", flags: MessageFlags.Ephemeral });
                 return;
             }
 
@@ -3313,7 +3314,7 @@ Main состав — основа нашей семьи. Здесь играю�
                     .setEmoji("🌿")
             );
 
-            await i.reply({ embeds: [rpMenuEmbed], components: [rpRow], ephemeral: true });
+            await i.reply({ embeds: [rpMenuEmbed], components: [rpRow], flags: MessageFlags.Ephemeral });
             rpMenuInteractions.set(i.user.id, i);
             setTimeout(() => deleteRpMenu(i.user.id), 120000);
             return;
@@ -3333,7 +3334,7 @@ Main состав — основа нашей семьи. Здесь играю�
             // Проверяем — нет ли уже ожидания от этого игрока
             const awaitRpKey = `rp_await_${i.user.id}`;
             if (applications.has(awaitRpKey)) {
-                await i.reply({ content: "⏳ Вы уже отправили тип отчёта — пришлите скриншот в этот канал.", ephemeral: true });
+                await i.reply({ content: "⏳ Вы уже отправили тип отчёта — пришлите скриншот в этот канал.", flags: MessageFlags.Ephemeral });
                 return;
             }
 
@@ -3359,7 +3360,7 @@ Main состав — основа нашей семьи. Здесь играю�
 
                 await i.reply({
                     content: `${typeData.emoji} **${typeData.label}**\n\n📎 Отправьте **фото или ссылку** на доказательство прямо в этот канал.\n⚠️ У вас есть **2 минуты**, иначе заявка отменится.`,
-                    ephemeral: true
+                    flags: MessageFlags.Ephemeral
                 });
                 scheduleEphemeralDelete(i);
 
@@ -3433,7 +3434,7 @@ Main состав — основа нашей семьи. Здесь играю�
 
 📎 Теперь отправьте **фото или ссылку** на доказательство прямо в этот канал.
 ⚠️ У вас есть **2 минуты**, иначе заявка отменится.`,
-                ephemeral: true
+                flags: MessageFlags.Ephemeral
             });
             scheduleEphemeralDelete(i);
 
@@ -3618,7 +3619,7 @@ Main состав — основа нашей семьи. Здесь играю�
 
             await i.reply({
                 content: `🏖️ Вы ушли в **долгосрочный отпуск**.\n📝 Причина: **${reason}**${returnText}\n\nУведомления о сборах приостановлены до возвращения. Чтобы выйти из отпуска — нажмите «Вернулся из АФК» в АФК списке.`,
-                ephemeral: true
+                flags: MessageFlags.Ephemeral
             });
             return;
         }
@@ -3649,7 +3650,7 @@ Main состав — основа нашей семьи. Здесь играю�
                     .setEmoji("🎬")
             );
 
-            await i.reply({ embeds: [otkatEmbed], components: [otkatRow], ephemeral: true });
+            await i.reply({ embeds: [otkatEmbed], components: [otkatRow], flags: MessageFlags.Ephemeral });
             return;
         }
 
@@ -3675,7 +3676,7 @@ Main состав — основа нашей семьи. Здесь играю�
 
             const isValidLink = /^https?:\/\//i.test(otkatLink);
             if (!isValidLink) {
-                await i.reply({ content: "❌ Укажите корректную ссылку (она должна начинаться с http:// или https://).", ephemeral: true });
+                await i.reply({ content: "❌ Укажите корректную ссылку (она должна начинаться с http:// или https://).", flags: MessageFlags.Ephemeral });
                 return;
             }
 
@@ -3713,7 +3714,7 @@ Main состав — основа нашей семьи. Здесь играю�
                 }
             }
 
-            await i.reply({ content: "✅ Ваш откат отправлен на проверку администрации.", ephemeral: true });
+            await i.reply({ content: "✅ Ваш откат отправлен на проверку администрации.", flags: MessageFlags.Ephemeral });
             return;
         }
 
@@ -3768,90 +3769,44 @@ Main состав — основа нашей семьи. Здесь играю�
         }
 
         // =====================================================
-        // ПОРТФЕЛЬ — создать личный канал для игрока
+        // ПОРТФЕЛЬ — создать пост в общем форуме
         // =====================================================
         if (i.isButton() && i.customId === "interaction_portfolio") {
-            await i.deferReply({ ephemeral: true });
+            await i.deferReply({ flags: MessageFlags.Ephemeral });
 
-            const config = SERVERS[i.guild.id];
-            if (!config) return;
+            const member = await i.guild.members.fetch(i.user.id).catch(() => null);
+            const result = member ? await ensurePortfolioThread(member) : null;
+            const portfolioThread = result?.thread || null;
 
-            // Название канала — только юзернейм игрока (санитайзинг под требования Discord)
-            const portfolioChannelName = i.user.username.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 20) || `user${i.user.id.slice(-4)}`;
+            if (!portfolioThread) {
+                await i.editReply({ content: "❌ Не удалось создать пост портфеля. Проверьте права бота и наличие форума." });
+                return;
+            }
 
-            // Проверяем — нет ли уже канала у этого игрока
-            const existingChannel = i.guild.channels.cache.find(
-                c => c.name === portfolioChannelName ||
-                     c.topic === `portfolio_${i.user.id}`
-            );
+            if (result.created) {
+                const curatorId = salary.recruits[i.user.id] || null;
+                const curatorText = curatorId ? `<@${curatorId}>` : "Не назначен";
+                const portfolioEmbed = new EmbedBuilder()
+                    .setTitle("💼 Личный портфель")
+                    .setThumbnail(i.user.displayAvatarURL({ dynamic: true }))
+                    .setDescription(
+                        `**Владелец:** <@${i.user.id}>\n` +
+                        `**Куратор:** ${curatorText}\n` +
+                        `**Дата создания:** ${new Date().toLocaleDateString("ru-RU")}`
+                    )
+                    .setColor("#2b2d31")
+                    .setTimestamp();
 
-            if (existingChannel) {
-                if (existingChannel.name !== portfolioChannelName) {
-                    await existingChannel.setName(portfolioChannelName).catch(() => null);
+                await portfolioThread.send({ embeds: [portfolioEmbed] }).catch(() => null);
+                if (curatorId) {
+                    await portfolioThread.send({
+                        content: `Куратор портфеля: <@${curatorId}>`,
+                        allowedMentions: { parse: [] }
+                    }).catch(() => null);
                 }
-                await i.editReply({ content: `📁 У вас уже есть портфель: ${existingChannel}` });
-                return;
             }
 
-            const categoryId = config.CHANNELS.PORTFOLIO_CATEGORY;
-
-            // Создаём канал
-            const portfolioChannel = await i.guild.channels.create({
-                name: portfolioChannelName,
-                type: ChannelType.GuildText,
-                parent: categoryId || null,
-                topic: `portfolio_${i.user.id}`,
-                permissionOverwrites: [
-                    {
-                        id: i.guild.id, // @everyone
-                        deny: ["ViewChannel"]
-                    },
-                    {
-                        id: i.user.id,
-                        allow: ["ViewChannel", "SendMessages", "ReadMessageHistory", "AttachFiles"]
-                    },
-                    {
-                        id: client.user.id,
-                        allow: ["ViewChannel", "SendMessages", "ReadMessageHistory", "ManageMessages"]
-                    }
-                ]
-            }).catch(() => null);
-
-            if (!portfolioChannel) {
-                await i.editReply({ content: "❌ Не удалось создать канал. Проверьте права бота." });
-                return;
-            }
-
-            // Ищем куратора — того кто принял игрока (из recruits)
-            const curatorId = salary.recruits[i.user.id] || null;
-            const curatorText = curatorId ? `<@${curatorId}>` : "Не назначен";
-
-            // Отправляем карточку портфеля в канал
-            const portfolioEmbed = new EmbedBuilder()
-                .setTitle("💼 Личный портфель")
-                .setThumbnail(i.user.displayAvatarURL({ dynamic: true }))
-                .setDescription(
-                    `**Владелец:** <@${i.user.id}>
-` +
-                    `**Куратор:** ${curatorText}
-` +
-                    `**Дата создания:** ${new Date().toLocaleDateString("ru-RU")}`
-                )
-                .setColor("#2b2d31")
-                .setTimestamp();
-
-            await portfolioChannel.send({ embeds: [portfolioEmbed] });
-
-            // Если есть куратор — даём ему доступ тоже
-            if (curatorId) {
-                await portfolioChannel.permissionOverwrites.edit(curatorId, {
-                    ViewChannel: true,
-                    SendMessages: true,
-                    ReadMessageHistory: true
-                }).catch(() => null);
-            }
-
-            await i.editReply({ content: `✅ Ваш портфель создан: ${portfolioChannel}` });
+            await i.editReply({ content: `✅ Ваш портфель создан в форуме: ${portfolioThread}` });
             return;
         }
 
@@ -3859,7 +3814,7 @@ Main состав — основа нашей семьи. Здесь играю�
             const tId = i.customId.replace("view_archive_app_", "");
             const arch = salary.archive[tId];
             if (!arch || !arch.fields) {
-                return i.reply({ content: "❌ Анкета не найдена в базе данных.", ephemeral: true });
+                return i.reply({ content: "❌ Анкета не найдена в базе данных.", flags: MessageFlags.Ephemeral });
             }
 
             const appEmbed = new EmbedBuilder()
@@ -3867,7 +3822,7 @@ Main состав — основа нашей семьи. Здесь играю�
                 .setDescription(`**Статик и Никнейм:** ${arch.fields.q1}\n\n**Имя и Возраст:** ${arch.fields.q2}\n\n**Опыт:** ${arch.fields.q3}\n\n**Почему именно мы:** ${arch.fields.q4}${arch.fields.q5 ? `\n\n**Откаты:** ${arch.fields.q5}` : ""}`)
                 .setColor("#1f8b4c");
 
-            await i.reply({ embeds: [appEmbed], ephemeral: true });
+            await i.reply({ embeds: [appEmbed], flags: MessageFlags.Ephemeral });
             return;
         }
 
@@ -3876,7 +3831,7 @@ Main состав — основа нашей семьи. Здесь играю�
         // =====================================================
         if (i.isButton() && i.customId === "shop_balance") {
             const currentPoints = salary.mpPoints[i.user.id] || 0;
-            await i.reply({ content: `🏆 Баланс баллов: \`${fmtPoints(currentPoints)}\``, ephemeral: true });
+            await i.reply({ content: `🏆 Баланс баллов: \`${fmtPoints(currentPoints)}\``, flags: MessageFlags.Ephemeral });
             return;
         }
 
@@ -3888,14 +3843,14 @@ Main состав — основа нашей семьи. Здесь играю�
             const currentPoints = salary.mpPoints[i.user.id] || 0;
 
             if (currentPoints < price) {
-                await i.reply({ content: `❌ Недостаточно баллов. Нужно **${price}**, у вас **${fmtPoints(currentPoints)}**.`, ephemeral: true });
+                await i.reply({ content: `❌ Недостаточно баллов. Нужно **${price}**, у вас **${fmtPoints(currentPoints)}**.`, flags: MessageFlags.Ephemeral });
                 return;
             }
 
             salary.mpPoints[i.user.id] = currentPoints - price;
             await saveDB(salary);
 
-            await i.reply({ content: `✅ Покупка оформлена: **Снять выговор**. Списано **${price}** баллов. Остаток: **${fmtPoints(salary.mpPoints[i.user.id])}**.\n⚠️ Заявка отправлена администрации на подтверждение.`, ephemeral: true });
+            await i.reply({ content: `✅ Покупка оформлена: **Снять выговор**. Списано **${price}** баллов. Остаток: **${fmtPoints(salary.mpPoints[i.user.id])}**.\n⚠️ Заявка отправлена администрации на подтверждение.`, flags: MessageFlags.Ephemeral });
 
             const reviewChannel = await client.channels.fetch(WARN_PURCHASE_CHANNEL).catch(() => null);
             if (reviewChannel) {
@@ -3938,9 +3893,7 @@ Main состав — основа нашей семьи. Здесь играю�
             await i.update({ embeds: [confirmedEmbed], components: [] });
 
             // Записываем в портфель игрока, если он у него есть
-            const portfolioChannel = i.guild.channels.cache.find(
-                c => c.topic === `portfolio_${userId}`
-            );
+            const portfolioChannel = await findPersonalReportChannel(i.guild, userId, true);
             if (portfolioChannel) {
                 const nowStr = new Date().toLocaleDateString("ru-RU") + " " + new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
                 const portfolioEmbed = new EmbedBuilder()
@@ -3965,14 +3918,14 @@ Main состав — основа нашей семьи. Здесь играю�
             const currentPoints = salary.mpPoints[i.user.id] || 0;
 
             if (currentPoints < price) {
-                await i.reply({ content: `❌ Недостаточно баллов. Нужно **${price}**, у вас **${fmtPoints(currentPoints)}**.`, ephemeral: true });
+                await i.reply({ content: `❌ Недостаточно баллов. Нужно **${price}**, у вас **${fmtPoints(currentPoints)}**.`, flags: MessageFlags.Ephemeral });
                 return;
             }
 
             salary.mpPoints[i.user.id] = currentPoints - price;
             await saveDB(salary);
 
-            await i.reply({ content: `✅ Покупка оформлена: **100,000 игровой валюты**. Списано **${price}** баллов. Остаток: **${fmtPoints(salary.mpPoints[i.user.id])}**.\n💵 Обратитесь к администрации для ручной выдачи.`, ephemeral: true });
+            await i.reply({ content: `✅ Покупка оформлена: **100,000 игровой валюты**. Списано **${price}** баллов. Остаток: **${fmtPoints(salary.mpPoints[i.user.id])}**.\n💵 Обратитесь к администрации для ручной выдачи.`, flags: MessageFlags.Ephemeral });
 
             const logChannel = await i.guild.channels.fetch("1518544382985371698").catch(() => null);
             if (logChannel) {
@@ -3990,31 +3943,31 @@ Main состав — основа нашей семьи. Здесь играю�
             const currentPoints = salary.mpPoints[i.user.id] || 0;
 
             if (currentPoints < price) {
-                await i.reply({ content: `❌ Недостаточно баллов. Нужно **${price}**, у вас **${fmtPoints(currentPoints)}**.`, ephemeral: true });
+                await i.reply({ content: `❌ Недостаточно баллов. Нужно **${price}**, у вас **${fmtPoints(currentPoints)}**.`, flags: MessageFlags.Ephemeral });
                 return;
             }
 
             const member = await i.guild.members.fetch(i.user.id).catch(() => null);
             if (!member) {
-                await i.reply({ content: "❌ Не удалось найти вас на сервере.", ephemeral: true });
+                await i.reply({ content: "❌ Не удалось найти вас на сервере.", flags: MessageFlags.Ephemeral });
                 return;
             }
 
             if (member.roles.cache.has(MAIN_ROLE_ID)) {
-                await i.reply({ content: "❌ У вас уже есть роль `main`.", ephemeral: true });
+                await i.reply({ content: "❌ У вас уже есть роль `main`.", flags: MessageFlags.Ephemeral });
                 return;
             }
 
             const roleAdded = await member.roles.add(MAIN_ROLE_ID).then(() => true).catch(() => false);
             if (!roleAdded) {
-                await i.reply({ content: "❌ Не удалось выдать роль. Проверьте права бота и иерархию ролей.", ephemeral: true });
+                await i.reply({ content: "❌ Не удалось выдать роль. Проверьте права бота и иерархию ролей.", flags: MessageFlags.Ephemeral });
                 return;
             }
 
             salary.mpPoints[i.user.id] = currentPoints - price;
             await saveDB(salary);
 
-            await i.reply({ content: `✅ Покупка оформлена: повышение до роли **main**. Списано **${price}** баллов. Остаток: **${fmtPoints(salary.mpPoints[i.user.id])}**.\n📈 Роль <@&${MAIN_ROLE_ID}> выдана автоматически.`, ephemeral: true });
+            await i.reply({ content: `✅ Покупка оформлена: повышение до роли **main**. Списано **${price}** баллов. Остаток: **${fmtPoints(salary.mpPoints[i.user.id])}**.\n📈 Роль <@&${MAIN_ROLE_ID}> выдана автоматически.`, flags: MessageFlags.Ephemeral });
 
             const logChannel = await i.guild.channels.fetch("1518544382985371698").catch(() => null);
             if (logChannel) {
@@ -4063,7 +4016,7 @@ Main состав — основа нашей семьи. Здесь играю�
                         `**Кто снял статус:** <@${i.user.id}>`
                     ]);
                 }
-                await i.reply({ content: "🏃 Вы вернулись из АФК! Уведомления о сборах возобновлены.", ephemeral: true });
+                await i.reply({ content: "🏃 Вы вернулись из АФК! Уведомления о сборах возобновлены.", flags: MessageFlags.Ephemeral });
                 await updateAFKEmbed(i.guild);
             }
             return;
@@ -4109,7 +4062,7 @@ Main состав — основа нашей семьи. Здесь играю�
 
             await i.reply({
                 content: `💤 Вы ушли в АФК.\n📝 Причина: **${reason}**${returnText}\n\nУведомления о сборах приостановлены.`,
-                ephemeral: true
+                flags: MessageFlags.Ephemeral
             });
             return;
         }
@@ -4147,7 +4100,7 @@ Main состав — основа нашей семьи. Здесь играю�
             const proofLink = i.fields.getTextInputValue("report_proof_link");
 
             if (!/^\d+$/.test(staticIdStr)) {
-                await i.reply({ content: "❌ Ошибка: В строке статического ID должны быть только цифры!", ephemeral: true });
+                await i.reply({ content: "❌ Ошибка: В строке статического ID должны быть только цифры!", flags: MessageFlags.Ephemeral });
                 return;
             }
 
@@ -4177,7 +4130,7 @@ Main состав — основа нашей семьи. Здесь играю�
             );
 
             await reportChannel.send({ embeds: [embed], components: [row] });
-            await i.reply({ content: `✅ Ваш отчет отправлен! Создан тикет проверки: <#${reportChannel.id}>`, ephemeral: true });
+            await i.reply({ content: `✅ Ваш отчет отправлен! Создан тикет проверки: <#${reportChannel.id}>`, flags: MessageFlags.Ephemeral });
             return;
         }
 
@@ -4188,7 +4141,7 @@ Main состав — основа нашей семьи. Здесь играю�
 
             const hasPermission = config.ALLOWED_ROLES && config.ALLOWED_ROLES.some(role => i.member.roles.cache.has(role));
             if (!hasPermission) {
-                return i.reply({ content: "❌ У вас нет прав для проверки отчетов.", ephemeral: true });
+                return i.reply({ content: "❌ У вас нет прав для проверки отчетов.", flags: MessageFlags.Ephemeral });
             }
 
             const targetMember = await i.guild.members.fetch(targetId).catch(() => null);
@@ -4251,7 +4204,7 @@ Main состав — основа нашей семьи. Здесь играю�
 
             const hasPermission = config.ALLOWED_ROLES && config.ALLOWED_ROLES.some(role => i.member.roles.cache.has(role));
             if (!hasPermission) {
-                return i.reply({ content: "❌ У вас нет прав для утверждения рангов.", ephemeral: true });
+                return i.reply({ content: "❌ У вас нет прав для утверждения рангов.", flags: MessageFlags.Ephemeral });
             }
 
             const targetMember = await i.guild.members.fetch(targetId).catch(() => null);
@@ -4260,7 +4213,7 @@ Main состав — основа нашей семьи. Здесь играю�
                 if (targetMember) {
                     await targetMember.send("❌ Ваше ручное повышение в планшете было отклонено старшим составом.").catch(() => null);
                 }
-                await i.reply({ content: "❌ Повышение отклонено.", ephemeral: true });
+                await i.reply({ content: "❌ Повышение отклонено.", flags: MessageFlags.Ephemeral });
                 await i.message.delete().catch(() => null);
                 return;
             }
@@ -4275,7 +4228,7 @@ Main состав — основа нашей семьи. Здесь играю�
                     await targetMember.send(`🎉 Поздравляем! Ваш ранг на сервере был успешно обновлен!`).catch(() => null);
                 }
 
-                await i.reply({ content: "✅ Роли игрока перевыданы, повышение зафиксировано!", ephemeral: true });
+                await i.reply({ content: "✅ Роли игрока перевыданы, повышение зафиксировано!", flags: MessageFlags.Ephemeral });
                 await i.message.delete().catch(() => null);
                 return;
             }
@@ -4304,7 +4257,7 @@ Main состав — основа нашей семьи. Здесь играю�
                 );
             }
 
-            await i.reply({ content: "Выберите тип сбора из списка ниже:", components: [menu], ephemeral: true });
+            await i.reply({ content: "Выберите тип сбора из списка ниже:", components: [menu], flags: MessageFlags.Ephemeral });
             return;
         }
 
@@ -4361,7 +4314,7 @@ Main состав — основа нашей семьи. Здесь играю�
                     .setEmoji("❌")
             );
 
-            await i.reply({ embeds: [controlEmbed], components: [controlRow], ephemeral: true });
+            await i.reply({ embeds: [controlEmbed], components: [controlRow], flags: MessageFlags.Ephemeral });
             return;
         }
 
@@ -4390,12 +4343,12 @@ Main состав — основа нашей семьи. Здесь играю�
                 const targetChannel = await targetGuild.channels.fetch(targetConfig.CHANNELS.SBOR).catch(() => null);
                 if (targetChannel) {
                     await targetChannel.send(messageContent).catch(() => null);
-                    await i.reply({ content: "✅ 1 сообщение успешно отправлено в канал сбора!", ephemeral: true });
+                    await i.reply({ content: "✅ 1 сообщение успешно отправлено в канал сбора!", flags: MessageFlags.Ephemeral });
                 } else {
-                    await i.reply({ content: "❌ Ошибка: канал сбора не найден на сервере.", ephemeral: true });
+                    await i.reply({ content: "❌ Ошибка: канал сбора не найден на сервере.", flags: MessageFlags.Ephemeral });
                 }
             } else if (action === "dms") {
-                await i.reply({ content: "⏳ Начинаю рассылку в ЛС (может занять время)...", ephemeral: true });
+                await i.reply({ content: "⏳ Начинаю рассылку в ЛС (может занять время)...", flags: MessageFlags.Ephemeral });
                 try {
                     await targetGuild.members.fetch();
                     const targetMembers = targetGuild.members.cache.filter(m => 
@@ -4489,7 +4442,7 @@ Main состав — основа нашей семьи. Здесь играю�
             const [, action, eventId] = i.customId.split("_");
             const event = plusEvents.get(eventId);
             if (!event || event.guildId !== i.guild.id) {
-                await i.reply({ content: "❌ Этот сбор плюсов больше не найден или бот был перезапущен.", ephemeral: true });
+                await i.reply({ content: "❌ Этот сбор плюсов больше не найден или бот был перезапущен.", flags: MessageFlags.Ephemeral });
                 return;
             }
 
@@ -4500,7 +4453,7 @@ Main состав — основа нашей семьи. Здесь играю�
 
             if (action === "join") {
                 if (inRegular) {
-                    await i.reply({ content: "ℹ️ Вы уже находитесь в обычных слотах.", ephemeral: true });
+                    await i.reply({ content: "ℹ️ Вы уже находитесь в обычных слотах.", flags: MessageFlags.Ephemeral });
                     return;
                 }
                 if (inExtra) {
@@ -4509,21 +4462,21 @@ Main состав — основа нашей семьи. Здесь играю�
                     event.participants.set(userId, { userId });
                 } else {
                     if (occupied >= event.slots) {
-                        await i.reply({ content: "❌ Все слоты уже заняты.", ephemeral: true });
+                        await i.reply({ content: "❌ Все слоты уже заняты.", flags: MessageFlags.Ephemeral });
                         return;
                     }
                     event.participants.set(userId, { userId });
                 }
             } else if (action === "leave") {
                 if (!inRegular && !inExtra) {
-                    await i.reply({ content: "ℹ️ Вы ещё не присоединились к этому сбору.", ephemeral: true });
+                    await i.reply({ content: "ℹ️ Вы ещё не присоединились к этому сбору.", flags: MessageFlags.Ephemeral });
                     return;
                 }
                 event.participants.delete(userId);
                 event.extraParticipants.delete(userId);
             } else if (action === "extra") {
                 if (inExtra) {
-                    await i.reply({ content: "ℹ️ Вы уже находитесь в дополнительных слотах.", ephemeral: true });
+                    await i.reply({ content: "ℹ️ Вы уже находитесь в дополнительных слотах.", flags: MessageFlags.Ephemeral });
                     return;
                 }
                 if (inRegular) {
@@ -4532,7 +4485,7 @@ Main состав — основа нашей семьи. Здесь играю�
                     event.extraParticipants.set(userId, { userId });
                 } else {
                     if (occupied >= event.slots) {
-                        await i.reply({ content: "❌ Свободных слотов больше нет.", ephemeral: true });
+                        await i.reply({ content: "❌ Свободных слотов больше нет.", flags: MessageFlags.Ephemeral });
                         return;
                     }
                     event.extraParticipants.set(userId, { userId });
@@ -4625,7 +4578,11 @@ Main состав — основа нашей семьи. Здесь играю�
             if (i.customId === "apply_modal_recruit") {
                 // Handled separately below
             } else {
-            if (modalLocks.has(i.user.id)) return;
+            await i.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => null);
+            if (modalLocks.has(i.user.id)) {
+                await i.editReply({ content: "⚠️ Заявка уже обрабатывается. Попробуйте ещё раз через несколько секунд." }).catch(() => null);
+                return;
+            }
             modalLocks.add(i.user.id);
             setTimeout(() => modalLocks.delete(i.user.id), 5000);
 
@@ -4640,7 +4597,7 @@ Main состав — основа нашей семьи. Здесь играю�
             );
 
             if (existingChannel) {
-                await i.reply({ content: `⚠️ Ваша заявка уже создана: <#${existingChannel.id}>`, ephemeral: true }).catch(() => null);
+                await i.editReply({ content: `⚠️ Ваша заявка уже создана: <#${existingChannel.id}>` }).catch(() => null);
                 return;
             }
 
@@ -4680,7 +4637,7 @@ Main состав — основа нашей семьи. Здесь играю�
             });
 
             await channel.send({ components: [container], flags: MessageFlags.IsComponentsV2 });
-            await i.reply({ content: `✅ Заявка создана! Канал: <#${channel.id}>`, ephemeral: true });
+            await i.editReply({ content: `✅ Заявка создана! Канал: <#${channel.id}>` }).catch(() => null);
             await sendApplicationAudit(i.guild, {
                 status: "Подана",
                 data,
@@ -4724,7 +4681,11 @@ ${data.q5}
         // ОБРАБОТКА ЗАЯВКИ В RECRUIT ОТДЕЛ
         // =====================================================
         if (i.isModalSubmit() && i.customId === "apply_modal_recruit") {
-            if (modalLocks.has(i.user.id)) return;
+            await i.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => null);
+            if (modalLocks.has(i.user.id)) {
+                await i.editReply({ content: "⚠️ Заявка уже обрабатывается. Попробуйте ещё раз через несколько секунд." }).catch(() => null);
+                return;
+            }
             modalLocks.add(i.user.id);
             setTimeout(() => modalLocks.delete(i.user.id), 5000);
 
@@ -4739,7 +4700,7 @@ ${data.q5}
             );
 
             if (existingChannel) {
-                await i.reply({ content: `⚠️ Ваша заявка уже создана: <#${existingChannel.id}>`, ephemeral: true }).catch(() => null);
+                await i.editReply({ content: `⚠️ Ваша заявка уже создана: <#${existingChannel.id}>` }).catch(() => null);
                 return;
             }
 
@@ -4779,7 +4740,7 @@ ${data.q5}
             });
 
             await recruitChannel.send({ components: [recruitContainer], flags: MessageFlags.IsComponentsV2 });
-            await i.reply({ content: `✅ Заявка в Recruit создана! Канал: <#${recruitChannel.id}>`, ephemeral: true });
+            await i.editReply({ content: `✅ Заявка в Recruit создана! Канал: <#${recruitChannel.id}>` }).catch(() => null);
             await sendApplicationAudit(i.guild, {
                 status: "Подана",
                 data: recruitData,
@@ -4846,7 +4807,7 @@ ${data.q5}
                 });
             }
 
-            await i.reply({ content: "✅ Ссылка отправлена кандидату в тикет и в ЛС!", ephemeral: true });
+            await i.reply({ content: "✅ Ссылка отправлена кандидату в тикет и в ЛС!", flags: MessageFlags.Ephemeral });
             return;
         }
 
@@ -4865,21 +4826,21 @@ ${data.q5}
                 if (action === "verify") {
                     const cId = parts[2];
                     if (!cId || cId === "unknown") {
-                        await i.reply({ content: "❌ Не удалось считать корректный Discord ID кандидата.", ephemeral: true });
+                        await i.reply({ content: "❌ Не удалось считать корректный Discord ID кандидата.", flags: MessageFlags.Ephemeral });
                         return;
                     }
                     const isPresent = await i.guild.members.fetch(cId).catch(() => null);
                     if (isPresent) {
-                        await i.reply({ content: `🟢 Пользователь <@${cId}> (\`${cId}\`) **находится** на сервере.`, ephemeral: true });
+                        await i.reply({ content: `🟢 Пользователь <@${cId}> (\`${cId}\`) **находится** на сервере.`, flags: MessageFlags.Ephemeral });
                     } else {
-                        await i.reply({ content: `🔴 Пользователь с ID \`${cId}\` **не найден** на сервере (вышел или не заходил).`, ephemeral: true });
+                        await i.reply({ content: `🔴 Пользователь с ID \`${cId}\` **не найден** на сервере (вышел или не заходил).`, flags: MessageFlags.Ephemeral });
                     }
                     return;
                 }
 
                 const hasPermission = config.ALLOWED_ROLES && config.ALLOWED_ROLES.some(role => member.roles.cache.has(role));
                 if (!hasPermission) {
-                    await i.reply({ content: "❌ У вас нет прав для управления аудитом.", ephemeral: true });
+                    await i.reply({ content: "❌ У вас нет прав для управления аудитом.", flags: MessageFlags.Ephemeral });
                     return;
                 }
 
@@ -4887,7 +4848,7 @@ ${data.q5}
                 const candidateId = parts[3];
 
                 if (action === "reject") {
-                    await i.reply({ content: "❌ Отчёт планшета отклонён. Сообщение удалено.", ephemeral: true });
+                    await i.reply({ content: "❌ Отчёт планшета отклонён. Сообщение удалено.", flags: MessageFlags.Ephemeral });
                     await i.message.delete().catch(() => null);
                     return;
                 }
@@ -4902,7 +4863,7 @@ ${data.q5}
                     await saveDB(salary);
                     await updateSalaryEmbed(i.guild);
 
-                    await i.reply({ content: "✅ Отчёт успешно подтвержден! Рекрутеру начислено $25,000.", ephemeral: true });
+                    await i.reply({ content: "✅ Отчёт успешно подтвержден! Рекрутеру начислено $25,000.", flags: MessageFlags.Ephemeral });
                     await i.message.delete().catch(() => null);
                     return;
                 }
@@ -4910,7 +4871,7 @@ ${data.q5}
 
             const hasPermission = config.ALLOWED_ROLES && config.ALLOWED_ROLES.some(role => member.roles.cache.has(role));
             if (!hasPermission) {
-                await i.reply({ content: "❌ У вас нет прав для нажатия этих кнопок.", ephemeral: true });
+                await i.reply({ content: "❌ У вас нет прав для нажатия этих кнопок.", flags: MessageFlags.Ephemeral });
                 return;
             }
 
@@ -4946,7 +4907,7 @@ ${data.q5}
 
                 if (action === "accept") {
                     if (!targetMember) {
-                        await i.reply({ content: "❌ Пользователь вышел с сервера.", ephemeral: true });
+                        await i.reply({ content: "❌ Пользователь вышел с сервера.", flags: MessageFlags.Ephemeral });
                         return;
                     }
 
@@ -5065,7 +5026,7 @@ ${data.q5}
                     if (currentReviewer && currentReviewer.id !== i.user.id) {
                         await i.reply({
                             content: `❌ Эту заявку уже рассматривает <@${currentReviewer.id}>. Дождитесь, пока она освободится.`,
-                            ephemeral: true
+                            flags: MessageFlags.Ephemeral
                         });
                         return;
                     }
@@ -5149,7 +5110,7 @@ ${data.q5}
                     await i.reply({
                         content: "⬇️ Выберите из выпадающего списка ниже войс-канал, в который отправить кандидата:",
                         components: [voiceMenu],
-                        ephemeral: true
+                        flags: MessageFlags.Ephemeral
                     });
                     return;
                 }
@@ -5184,11 +5145,13 @@ ${data.q5}
 // =====================================================
 const DEDUCT_ROLE_ID = "1458410670071615580";
 const PERSONAL_REPORT_ROLE_ID = "1458410756453306490";
-const PERSONAL_REPORT_CATEGORY_ID = "1540292539943485450";
-const PERSONAL_REPORT_ARCHIVE_CATEGORY_ID = "1541144152689999932";
+const PERSONAL_REPORT_FORUM_ID = "1543149973044990062";
+const PERSONAL_REPORT_CATEGORY_ID = "1540292539943485450"; // legacy
+const PERSONAL_REPORT_ARCHIVE_CATEGORY_ID = "1541144152689999932"; // legacy
 const PERSONAL_REPORT_VIEW_ROLE_ID = "1541082447293452450";
 const PERSONAL_REPORT_HIGH_RANK_ROLE_ID = "1458484199735689299";
 const PERSONAL_REPORT_TOPIC_PREFIX = "darkness-personal-report:";
+const PORTFOLIO_TOPIC_PREFIX = "portfolio_";
 
 function personalReportNoticePayload({ userId, title, message, color = 0xE74C3C, mentionHighRank = true }) {
     const container = new ContainerBuilder()
@@ -5207,7 +5170,7 @@ function personalReportNoticePayload({ userId, title, message, color = 0xE74C3C,
 }
 
 function personalReportChannelName(member) {
-    const rawName = String(member.user?.username || member.displayName || "user")
+    const rawName = String(member?.user?.username || member?.displayName || "user")
         .toLowerCase()
         .replace(/[^a-z0-9а-яё_-]+/gi, "-")
         .replace(/-+/g, "-")
@@ -5216,78 +5179,88 @@ function personalReportChannelName(member) {
     return rawName;
 }
 
-async function findPersonalReportChannel(guild, userId, refresh = false) {
-    if (!guild || guild.id !== "1458190222042075251") return null;
-    if (refresh) await guild.channels.fetch().catch(() => null);
-    return guild.channels.cache.find(channel =>
-        channel.type === ChannelType.GuildText &&
-        [PERSONAL_REPORT_CATEGORY_ID, PERSONAL_REPORT_ARCHIVE_CATEGORY_ID].includes(channel.parentId) &&
-        channel.topic === `${PERSONAL_REPORT_TOPIC_PREFIX}${userId}`
-    ) || null;
+function portfolioThreadName(userId) {
+    return `portfolio-${userId}`;
 }
 
-async function ensurePersonalReportChannel(member) {
-    const guild = member?.guild;
+async function getPortfolioForum(guild) {
     if (!guild || guild.id !== "1458190222042075251") return null;
+    const forum = await guild.channels.fetch(PERSONAL_REPORT_FORUM_ID).catch(() => null);
+    return forum?.type === ChannelType.GuildForum ? forum : null;
+}
 
-    const category = await guild.channels.fetch(PERSONAL_REPORT_CATEGORY_ID).catch(() => null);
-    if (!category || category.type !== ChannelType.GuildCategory) {
-        console.error(`[PERSONAL REPORT] Категория ${PERSONAL_REPORT_CATEGORY_ID} не найдена.`);
+async function fetchPortfolioThreads(forum) {
+    if (!forum) return [];
+    const active = await forum.threads.fetchActive().catch(() => null);
+    const archived = await forum.threads.fetchArchived({ type: "public", limit: 100 }).catch(() => null);
+    const threads = [
+        ...Array.from(active?.threads?.values?.() || []),
+        ...Array.from(archived?.threads?.values?.() || [])
+    ];
+    return [...new Map(threads.map(thread => [thread.id, thread])).values()];
+}
+
+async function findPortfolioThread(guild, userId, refresh = false) {
+    const forum = await getPortfolioForum(guild);
+    if (!forum) return null;
+    if (refresh) await guild.channels.fetch().catch(() => null);
+
+    const expectedName = portfolioThreadName(userId);
+    const threads = await fetchPortfolioThreads(forum);
+    return threads.find(thread => thread.name === expectedName) || null;
+}
+
+async function createPortfolioThread(guild, userId, member = null) {
+    const forum = await getPortfolioForum(guild);
+    if (!forum) {
+        console.error(`[PORTFOLIO] Форум ${PERSONAL_REPORT_FORUM_ID} не найден.`);
         return null;
     }
 
-    let channel = await findPersonalReportChannel(guild, member.id, true);
-    const permissionOverwrites = [
-        { id: guild.id, deny: ["ViewChannel"] },
-        { id: member.id, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory", "AttachFiles"] },
-        { id: PERSONAL_REPORT_VIEW_ROLE_ID, allow: ["ViewChannel", "ReadMessageHistory"] },
-        { id: PERSONAL_REPORT_HIGH_RANK_ROLE_ID, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory"] },
-        { id: client.user.id, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory", "ManageChannels", "ManageMessages"] }
-    ];
+    const displayName = member?.user?.username || member?.displayName || userId;
+    const intro = personalReportNoticePayload({
+        userId,
+        title: "💼 Личный портфель",
+        message: `**Владелец:** <@${userId}>\n\nПост портфеля создан автоматически. Здесь будут храниться РП-отчёты, откаты и история участника.`,
+        color: 0x2B2D31,
+        mentionHighRank: false
+    });
 
-    if (!channel) {
-        channel = await guild.channels.create({
-            name: personalReportChannelName(member),
-            type: ChannelType.GuildText,
-            parent: category.id,
-            topic: `${PERSONAL_REPORT_TOPIC_PREFIX}${member.id}`,
-            permissionOverwrites
-        }).catch(error => {
-            console.error("[PERSONAL REPORT CREATE ERROR]", error);
-            return null;
-        });
+    return forum.threads.create({
+        name: portfolioThreadName(userId),
+        message: intro,
+        reason: `Создание портфеля ${displayName}`
+    }).catch(error => {
+        console.error("[PORTFOLIO THREAD CREATE ERROR]", error);
+        return null;
+    });
+}
 
-        if (channel) {
-            const intro = personalReportNoticePayload({
-                title: "📁 Личный канал отчётов",
-                message: `**Участник:** <@${member.id}>\n\nСюда будут поступать личные РП отчёты и доказательства участника.`,
-                color: 0x2B2D31,
-                mentionHighRank: false
-            });
-            await channel.send(intro).catch(() => null);
-        }
-    } else {
-        // После повторной выдачи роли возвращаем архивный портфель в рабочую категорию.
-        if (channel.parentId !== PERSONAL_REPORT_CATEGORY_ID) {
-            const activeCategory = await guild.channels.fetch(PERSONAL_REPORT_CATEGORY_ID).catch(() => null);
-            if (activeCategory?.type === ChannelType.GuildCategory) {
-                await channel.setParent(activeCategory.id, { lockPermissions: false }).catch(() => null);
-            }
-        }
+async function ensurePortfolioThread(member, { unarchive = true } = {}) {
+    const guild = member?.guild;
+    if (!guild || guild.id !== "1458190222042075251") return { thread: null, created: false };
 
-        // Если участнику повторно выдали роль, возвращаем ему доступ к его каналу.
-        if (channel.name !== personalReportChannelName(member)) {
-            await channel.setName(personalReportChannelName(member)).catch(() => null);
-        }
-        await channel.permissionOverwrites.edit(member.id, {
-            ViewChannel: true,
-            SendMessages: true,
-            ReadMessageHistory: true,
-            AttachFiles: true
-        }).catch(() => null);
+    let thread = await findPortfolioThread(guild, member.id, true);
+    let created = false;
+    if (!thread) {
+        thread = await createPortfolioThread(guild, member.id, member);
+        created = !!thread;
     }
 
-    return channel;
+    if (thread && unarchive && thread.archived) {
+        await thread.setArchived(false).catch(() => null);
+    }
+
+    return { thread, created };
+}
+
+async function findPersonalReportChannel(guild, userId, refresh = false) {
+    return findPortfolioThread(guild, userId, refresh);
+}
+
+async function ensurePersonalReportChannel(member) {
+    const result = await ensurePortfolioThread(member, { unarchive: true });
+    return result.thread;
 }
 
 function componentsContainText(components, text) {
@@ -5300,10 +5273,10 @@ function componentsContainText(components, text) {
 }
 
 async function deletePersonalReportRoleLostNotice(guild, userId) {
-    const channel = await findPersonalReportChannel(guild, userId, true);
-    if (!channel) return;
+    const thread = await findPortfolioThread(guild, userId, true);
+    if (!thread) return;
 
-    const messages = await channel.messages.fetch({ limit: 100 }).catch(() => null);
+    const messages = await thread.messages.fetch({ limit: 100 }).catch(() => null);
     if (!messages) return;
 
     const notices = messages.filter(message =>
@@ -5317,27 +5290,115 @@ async function deletePersonalReportRoleLostNotice(guild, userId) {
 }
 
 async function notifyPersonalReportRoleLost(guild, userId, reason) {
-    const channel = await findPersonalReportChannel(guild, userId, true);
-    if (!channel) return;
+    const thread = await findPortfolioThread(guild, userId, true);
+    if (!thread) return;
 
-    await channel.send(personalReportNoticePayload({
+    if (thread.archived) await thread.setArchived(false).catch(() => null);
+
+    await thread.send(personalReportNoticePayload({
         userId,
         title: reason === "leave" ? "📤 Участник вышел с сервера" : "⚠️ Роль участника снята",
         message: reason === "leave"
-            ? `<@${userId}> вышел с сервера. Доступ к личному каналу закрыт.\n\n<@&${PERSONAL_REPORT_HIGH_RANK_ROLE_ID}> требуется учесть это в кадровом составе.`
-            : `<@${userId}> потерял роль <@&${PERSONAL_REPORT_ROLE_ID}>. Доступ к личному каналу закрыт.\n\n<@&${PERSONAL_REPORT_HIGH_RANK_ROLE_ID}> требуется проверить участника.`,
+            ? `<@${userId}> вышел с сервера. Пост портфеля отправлен в архив.\n\n<@&${PERSONAL_REPORT_HIGH_RANK_ROLE_ID}> требуется учесть это в кадровом составе.`
+            : `<@${userId}> потерял роль <@&${PERSONAL_REPORT_ROLE_ID}>. Пост портфеля отправлен в архив.\n\n<@&${PERSONAL_REPORT_HIGH_RANK_ROLE_ID}> требуется проверить участника.`,
         color: 0xE74C3C,
         mentionHighRank: true
     })).catch(() => null);
 
-    // Переносим портфель в архивную категорию, канал не удаляем.
-    const archiveCategory = await guild.channels.fetch(PERSONAL_REPORT_ARCHIVE_CATEGORY_ID).catch(() => null);
-    if (archiveCategory?.type === ChannelType.GuildCategory && channel.parentId !== archiveCategory.id) {
-        await channel.setParent(archiveCategory.id, { lockPermissions: false }).catch(() => null);
+    // В форуме архивом является архивирование поста, сам пост и история сохраняются.
+    await thread.setArchived(true).catch(() => null);
+}
+
+async function migrateLegacyPortfolioChannels(guild) {
+    if (!guild || guild.id !== "1458190222042075251") return;
+    await guild.channels.fetch().catch(() => null);
+
+    const legacyChannels = guild.channels.cache.filter(channel =>
+        channel.type === ChannelType.GuildText &&
+        [PERSONAL_REPORT_CATEGORY_ID, PERSONAL_REPORT_ARCHIVE_CATEGORY_ID, SERVERS[guild.id]?.CHANNELS?.PORTFOLIO_CATEGORY].includes(channel.parentId) &&
+        (String(channel.topic || "").startsWith(PERSONAL_REPORT_TOPIC_PREFIX) || String(channel.topic || "").startsWith(PORTFOLIO_TOPIC_PREFIX))
+    );
+
+    for (const legacyChannel of legacyChannels.values()) {
+        const topic = String(legacyChannel.topic || "");
+        const userId = topic.startsWith(PERSONAL_REPORT_TOPIC_PREFIX)
+            ? topic.replace(PERSONAL_REPORT_TOPIC_PREFIX, "")
+            : topic.replace(PORTFOLIO_TOPIC_PREFIX, "");
+        if (!/^\d{15,25}$/.test(userId)) continue;
+
+        let thread = await findPortfolioThread(guild, userId, true);
+        if (!thread) {
+            const member = await guild.members.fetch(userId).catch(() => null);
+            thread = await createPortfolioThread(guild, userId, member);
+            if (!thread) continue;
+
+            const messages = await legacyChannel.messages.fetch({ limit: 100 }).catch(() => null);
+            if (messages) {
+                const orderedMessages = [...messages.values()].sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+                for (const message of orderedMessages) {
+                    try {
+                        if (message.components?.length && message.flags?.has(MessageFlags.IsComponentsV2)) {
+                            const components = message.components.map(component =>
+                                typeof component.toJSON === "function" ? component.toJSON() : component
+                            );
+                            await thread.send({
+                                components,
+                                flags: MessageFlags.IsComponentsV2,
+                                allowedMentions: { parse: [] }
+                            });
+                        } else {
+                            const attachmentLinks = [...message.attachments.values()].map(attachment => attachment.url);
+                            const content = [message.content, ...attachmentLinks].filter(Boolean).join("\n");
+                            if (content) {
+                                await thread.send({ content, allowedMentions: { parse: [] } });
+                            }
+                        }
+                    } catch (error) {
+                        console.error(`[PORTFOLIO MIGRATION MESSAGE ERROR] ${legacyChannel.id}`, error);
+                    }
+                }
+            }
+        }
+
+        // Старый канал оставляем как резервную копию, но закрываем его для обычного просмотра.
+        await legacyChannel.permissionOverwrites.edit(guild.id, { ViewChannel: false }).catch(() => null);
+    }
+}
+
+async function ensurePersonalReportForumAccess(guild) {
+    const forum = await getPortfolioForum(guild);
+    if (!forum) {
+        console.error(`[PORTFOLIO] Форум ${PERSONAL_REPORT_FORUM_ID} не найден.`);
+        return;
     }
 
-    // Запрещаем просмотр участнику, но сам канал и история сохраняются.
-    await channel.permissionOverwrites.delete(userId).catch(() => null);
+    await forum.permissionOverwrites.edit(guild.id, { ViewChannel: false }).catch(() => null);
+    await forum.permissionOverwrites.edit(PERSONAL_REPORT_VIEW_ROLE_ID, {
+        ViewChannel: true,
+        ReadMessageHistory: true
+    }).catch(() => null);
+    await forum.permissionOverwrites.edit(PERSONAL_REPORT_HIGH_RANK_ROLE_ID, {
+        ViewChannel: true,
+        SendMessages: true,
+        ReadMessageHistory: true
+    }).catch(() => null);
+    await forum.permissionOverwrites.edit(client.user.id, {
+        ViewChannel: true,
+        SendMessages: true,
+        ReadMessageHistory: true,
+        ManageThreads: true,
+        ManageMessages: true
+    }).catch(() => null);
+}
+
+async function initPersonalReportChannels(guild) {
+    if (!guild || guild.id !== "1458190222042075251") return;
+    await guild.members.fetch().catch(() => null);
+    for (const member of guild.members.cache.values()) {
+        if (member.roles.cache.has(PERSONAL_REPORT_ROLE_ID)) {
+            await ensurePersonalReportChannel(member);
+        }
+    }
 }
 
 async function sendRpReportToPersonalChannel(guild, userId, rpData, evidenceUrl) {
