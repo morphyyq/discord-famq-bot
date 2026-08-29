@@ -5194,6 +5194,11 @@ const PERSONAL_REPORT_TOPIC_PREFIX = "darkness-personal-report:";
 const PORTFOLIO_TOPIC_PREFIX = "portfolio_";
 const PERSONAL_REPORT_FORUM_ID = "1543149973044990062"; // legacy forum, migration source only
 const PORTFOLIO_ADMIN_TOPIC_PREFIX = "darkness-portfolio-admin:";
+const PORTFOLIO_CATEGORY_NAME = "Портфели";
+const PORTFOLIO_ARCHIVE_CATEGORY_NAME = "Архив портфелей";
+const PORTFOLIO_ADMIN_CATEGORY_NAME = "Админ-портфели";
+const PORTFOLIO_ADMIN_ARCHIVE_CATEGORY_NAME = "Архив админ-портфелей";
+const DISCORD_CATEGORY_CHANNEL_LIMIT = 50;
 const PORTFOLIO_REWARD_RP_POINTS = 3;
 const PORTFOLIO_REWARD_CAPT_POINTS = 5;
 
@@ -5213,7 +5218,7 @@ function personalReportNoticePayload({ userId, title, message, color = 0xE74C3C,
     };
 }
 
-function personalReportChannelName(member) {
+function portfolioBaseChannelName(member) {
     const rawName = String(member?.user?.username || member?.displayName || "user")
         .toLowerCase()
         .replace(/[^a-z0-9а-яё_-]+/gi, "-")
@@ -5221,6 +5226,10 @@ function personalReportChannelName(member) {
         .replace(/^-|-$/g, "")
         .slice(0, 70) || "user";
     return rawName;
+}
+
+function personalReportChannelName(member) {
+    return `└ ${portfolioBaseChannelName(member)}`.slice(0, 100);
 }
 
 function extractPortfolioUserId(topic) {
@@ -5231,11 +5240,108 @@ function extractPortfolioUserId(topic) {
 }
 
 function portfolioCategoryIds(guild) {
-    return [
-        PERSONAL_REPORT_CATEGORY_ID,
-        PERSONAL_REPORT_ARCHIVE_CATEGORY_ID,
-        SERVERS[guild?.id]?.CHANNELS?.PORTFOLIO_CATEGORY
-    ].filter(Boolean);
+    return guild?.channels?.cache
+        ? [...guild.channels.cache.values()]
+            .filter(channel => channel.type === ChannelType.GuildCategory)
+            .filter(channel => {
+                const name = String(channel.name || "");
+                return [
+                    PERSONAL_REPORT_CATEGORY_ID,
+                    PERSONAL_REPORT_ARCHIVE_CATEGORY_ID,
+                    SERVERS[guild.id]?.CHANNELS?.PORTFOLIO_CATEGORY
+                ].includes(channel.id) ||
+                    name === PORTFOLIO_CATEGORY_NAME || name.startsWith(`${PORTFOLIO_CATEGORY_NAME} `) ||
+                    name === PORTFOLIO_ARCHIVE_CATEGORY_NAME || name.startsWith(`${PORTFOLIO_ARCHIVE_CATEGORY_NAME} `) ||
+                    name === PORTFOLIO_ADMIN_CATEGORY_NAME || name.startsWith(`${PORTFOLIO_ADMIN_CATEGORY_NAME} `) ||
+                    name === PORTFOLIO_ADMIN_ARCHIVE_CATEGORY_NAME || name.startsWith(`${PORTFOLIO_ADMIN_ARCHIVE_CATEGORY_NAME} `);
+            })
+            .map(channel => channel.id)
+        : [];
+}
+
+function categoryNameForPortfolioType(type) {
+    return {
+        active: PORTFOLIO_CATEGORY_NAME,
+        archive: PORTFOLIO_ARCHIVE_CATEGORY_NAME,
+        admin: PORTFOLIO_ADMIN_CATEGORY_NAME,
+        adminArchive: PORTFOLIO_ADMIN_ARCHIVE_CATEGORY_NAME
+    }[type];
+}
+
+async function configurePortfolioCategory(category, type) {
+    if (!category?.permissionOverwrites) return;
+    await category.permissionOverwrites.edit(category.guild.id, { ViewChannel: false }).catch(() => null);
+    await category.permissionOverwrites.edit(PERSONAL_REPORT_VIEW_ROLE_ID, {
+        ViewChannel: true,
+        ReadMessageHistory: true,
+        ...(type === "admin" || type === "adminArchive" ? { SendMessages: true } : {})
+    }).catch(() => null);
+    await category.permissionOverwrites.edit(PERSONAL_REPORT_HIGH_RANK_ROLE_ID, {
+        ViewChannel: true,
+        SendMessages: true,
+        ReadMessageHistory: true
+    }).catch(() => null);
+    await category.permissionOverwrites.edit(client.user.id, {
+        ViewChannel: true,
+        SendMessages: true,
+        ReadMessageHistory: true,
+        ManageChannels: true,
+        ManageMessages: true
+    }).catch(() => null);
+}
+
+async function getAvailablePortfolioCategory(guild, type) {
+    await guild.channels.fetch().catch(() => null);
+    const baseId = type === "active"
+        ? PERSONAL_REPORT_CATEGORY_ID
+        : type === "archive"
+            ? PERSONAL_REPORT_ARCHIVE_CATEGORY_ID
+            : null;
+    const baseName = categoryNameForPortfolioType(type);
+    const categories = guild.channels.cache.filter(channel => {
+        if (channel.type !== ChannelType.GuildCategory) return false;
+        if (channel.id === baseId) return true;
+        const name = String(channel.name || "");
+        return name === baseName || name.startsWith(`${baseName} `);
+    });
+
+    const ordered = [...categories.values()].sort((a, b) => a.position - b.position);
+    for (const category of ordered) {
+        if (category.children?.cache?.size < DISCORD_CATEGORY_CHANNEL_LIMIT) {
+            await configurePortfolioCategory(category, type);
+            return category;
+        }
+    }
+
+    let nextNumber = 1;
+    const pattern = new RegExp(`^${baseName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} (\\d+)$`, "i");
+    for (const category of ordered) {
+        const match = String(category.name || "").match(pattern);
+        if (match) nextNumber = Math.max(nextNumber, Number(match[1]) + 1);
+    }
+    if (baseId && ordered.some(category => category.id === baseId)) nextNumber = Math.max(nextNumber, 2);
+
+    const category = await guild.channels.create({
+        name: `${baseName} ${nextNumber}`,
+        type: ChannelType.GuildCategory,
+        permissionOverwrites: [
+            { id: guild.id, deny: ["ViewChannel"] },
+            { id: PERSONAL_REPORT_VIEW_ROLE_ID, allow: ["ViewChannel", "ReadMessageHistory", ...(type === "admin" || type === "adminArchive" ? ["SendMessages"] : [])] },
+            { id: PERSONAL_REPORT_HIGH_RANK_ROLE_ID, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory"] },
+            { id: client.user.id, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory", "ManageChannels", "ManageMessages"] }
+        ]
+    }).catch(error => {
+        console.error(`[PORTFOLIO CATEGORY CREATE ERROR] ${type}`, error);
+        return null;
+    });
+    return category;
+}
+
+function isArchivePortfolioCategory(guild, categoryId) {
+    const category = guild.channels.cache.get(categoryId);
+    if (!category) return categoryId === PERSONAL_REPORT_ARCHIVE_CATEGORY_ID;
+    const name = String(category.name || "");
+    return category.id === PERSONAL_REPORT_ARCHIVE_CATEGORY_ID || name === PORTFOLIO_ARCHIVE_CATEGORY_NAME || name.startsWith(`${PORTFOLIO_ARCHIVE_CATEGORY_NAME} `);
 }
 
 async function findPersonalReportChannel(guild, userId, refresh = false) {
@@ -5244,7 +5350,6 @@ async function findPersonalReportChannel(guild, userId, refresh = false) {
 
     return guild.channels.cache.find(channel =>
         channel.type === ChannelType.GuildText &&
-        portfolioCategoryIds(guild).includes(channel.parentId) &&
         extractPortfolioUserId(channel.topic) === String(userId)
     ) || null;
 }
@@ -5253,11 +5358,8 @@ async function createPrivatePortfolioChannel(member, topicPrefix = PORTFOLIO_TOP
     const guild = member?.guild;
     if (!guild || guild.id !== "1458190222042075251") return null;
 
-    const category = await guild.channels.fetch(PERSONAL_REPORT_CATEGORY_ID).catch(() => null);
-    if (!category || category.type !== ChannelType.GuildCategory) {
-        console.error(`[PORTFOLIO] Категория ${PERSONAL_REPORT_CATEGORY_ID} не найдена.`);
-        return null;
-    }
+    const category = await getAvailablePortfolioCategory(guild, "active");
+    if (!category) return null;
 
     const permissionOverwrites = [
         { id: guild.id, deny: ["ViewChannel"] },
@@ -5292,7 +5394,7 @@ async function createPrivatePortfolioChannel(member, topicPrefix = PORTFOLIO_TOP
 }
 
 function portfolioAdminChannelName(member) {
-    return `admin-${personalReportChannelName(member)}`.slice(0, 100);
+    return `┌ Админ ${portfolioBaseChannelName(member)}`.slice(0, 100);
 }
 
 async function findPortfolioAdminChannel(guild, userId, refresh = false) {
@@ -5301,7 +5403,6 @@ async function findPortfolioAdminChannel(guild, userId, refresh = false) {
 
     return guild.channels.cache.find(channel =>
         channel.type === ChannelType.GuildText &&
-        portfolioCategoryIds(guild).includes(channel.parentId) &&
         String(channel.topic || "") === `${PORTFOLIO_ADMIN_TOPIC_PREFIX}${userId}`
     ) || null;
 }
@@ -5323,7 +5424,7 @@ function buildPortfolioAdminContainer(userId, displayName) {
     return new ContainerBuilder()
         .setAccentColor(0x2B2D31)
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(
-            `## ┌ Админ ${displayName}\n## └ ${displayName}`
+            `## Админ-портфель: ${displayName}`
         ))
         .addSeparatorComponents(new SeparatorBuilder())
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(
@@ -5338,9 +5439,24 @@ function buildPortfolioAdminContainer(userId, displayName) {
 async function ensurePortfolioAdminChannel(member, portfolioChannel) {
     if (!member?.guild || !portfolioChannel) return null;
     const guild = member.guild;
+    const adminType = isArchivePortfolioCategory(guild, portfolioChannel.parentId) ? "adminArchive" : "admin";
     let adminChannel = await findPortfolioAdminChannel(guild, member.id, true);
+    let adminCategory = null;
+
+    if (adminChannel) {
+        const currentCategory = guild.channels.cache.get(adminChannel.parentId);
+        const expectedName = categoryNameForPortfolioType(adminType);
+        const currentName = String(currentCategory?.name || "");
+        const isCorrectCategory = currentName === expectedName || currentName.startsWith(`${expectedName} `);
+        if (!isCorrectCategory) {
+            adminCategory = await getAvailablePortfolioCategory(guild, adminType);
+        }
+    } else {
+        adminCategory = await getAvailablePortfolioCategory(guild, adminType);
+    }
 
     if (!adminChannel) {
+        if (!adminCategory) return null;
         const permissionOverwrites = [
             { id: guild.id, deny: ["ViewChannel"] },
             { id: PERSONAL_REPORT_VIEW_ROLE_ID, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory"] },
@@ -5351,7 +5467,7 @@ async function ensurePortfolioAdminChannel(member, portfolioChannel) {
         adminChannel = await guild.channels.create({
             name: portfolioAdminChannelName(member),
             type: ChannelType.GuildText,
-            parent: portfolioChannel.parentId,
+            parent: adminCategory.id,
             topic: `${PORTFOLIO_ADMIN_TOPIC_PREFIX}${member.id}`,
             permissionOverwrites
         }).catch(error => {
@@ -5365,8 +5481,8 @@ async function ensurePortfolioAdminChannel(member, portfolioChannel) {
     if (adminChannel.name !== portfolioAdminChannelName(member)) {
         await adminChannel.setName(portfolioAdminChannelName(member)).catch(() => null);
     }
-    if (adminChannel.parentId !== portfolioChannel.parentId) {
-        await adminChannel.setParent(portfolioChannel.parentId, { lockPermissions: false }).catch(() => null);
+    if (adminCategory && adminChannel.parentId !== adminCategory.id) {
+        await adminChannel.setParent(adminCategory.id, { lockPermissions: false }).catch(() => null);
     }
 
     await adminChannel.permissionOverwrites.edit(guild.id, { ViewChannel: false }).catch(() => null);
@@ -5388,8 +5504,7 @@ async function ensurePortfolioAdminChannel(member, portfolioChannel) {
         ManageMessages: true
     }).catch(() => null);
 
-    // Позиция админ-канала — непосредственно над портфелем.
-    await adminChannel.setPosition(Math.max(0, portfolioChannel.rawPosition)).catch(() => null);
+    // Админские каналы находятся в отдельной категории из-за лимита Discord в 50 каналов.
 
     const messages = await adminChannel.messages.fetch({ limit: 50 }).catch(() => null);
     const hasPanel = messages?.some(message =>
@@ -5398,7 +5513,7 @@ async function ensurePortfolioAdminChannel(member, portfolioChannel) {
     );
     if (!hasPanel) {
         await adminChannel.send({
-            components: [buildPortfolioAdminContainer(member.id, personalReportChannelName(member))],
+            components: [buildPortfolioAdminContainer(member.id, portfolioBaseChannelName(member))],
             flags: MessageFlags.IsComponentsV2,
             allowedMentions: { parse: [] }
         }).catch(() => null);
@@ -5420,12 +5535,13 @@ async function ensurePrivatePortfolioChannel(member, { restoreFromArchive = fals
 
     if (!channel) return { channel: null, created: false };
 
-    const activeCategory = await guild.channels.fetch(PERSONAL_REPORT_CATEGORY_ID).catch(() => null);
-    const archiveCategory = await guild.channels.fetch(PERSONAL_REPORT_ARCHIVE_CATEGORY_ID).catch(() => null);
-    const isInArchive = channel.parentId === archiveCategory?.id;
+    const isInArchive = isArchivePortfolioCategory(guild, channel.parentId);
     const shouldRestore = restoreFromArchive || !isInArchive;
+    const activeCategory = shouldRestore
+        ? await getAvailablePortfolioCategory(guild, "active")
+        : null;
 
-    if (shouldRestore && activeCategory?.type === ChannelType.GuildCategory && channel.parentId !== activeCategory.id) {
+    if (shouldRestore && activeCategory && channel.parentId !== activeCategory.id) {
         await channel.setParent(activeCategory.id, { lockPermissions: false }).catch(() => null);
     }
 
@@ -5504,14 +5620,13 @@ async function notifyPersonalReportRoleLost(guild, userId, reason) {
     })).catch(() => null);
 
     const adminChannel = await findPortfolioAdminChannel(guild, userId, true);
-    const archiveCategory = await guild.channels.fetch(PERSONAL_REPORT_ARCHIVE_CATEGORY_ID).catch(() => null);
-    if (archiveCategory?.type === ChannelType.GuildCategory) {
-        if (channel.parentId !== archiveCategory.id) {
-            await channel.setParent(archiveCategory.id, { lockPermissions: false }).catch(() => null);
-        }
-        if (adminChannel && adminChannel.parentId !== archiveCategory.id) {
-            await adminChannel.setParent(archiveCategory.id, { lockPermissions: false }).catch(() => null);
-        }
+    const archiveCategory = await getAvailablePortfolioCategory(guild, "archive");
+    const adminArchiveCategory = await getAvailablePortfolioCategory(guild, "adminArchive");
+    if (archiveCategory && channel.parentId !== archiveCategory.id) {
+        await channel.setParent(archiveCategory.id, { lockPermissions: false }).catch(() => null);
+    }
+    if (adminChannel && adminArchiveCategory && adminChannel.parentId !== adminArchiveCategory.id) {
+        await adminChannel.setParent(adminArchiveCategory.id, { lockPermissions: false }).catch(() => null);
     }
     await channel.permissionOverwrites.delete(userId).catch(() => null);
 }
@@ -5542,12 +5657,13 @@ async function migrateForumPortfoliosToChannels(guild) {
             await ensurePortfolioAdminChannel(member, channel);
 
             if (thread.archived) {
-                const archiveCategory = await guild.channels.fetch(PERSONAL_REPORT_ARCHIVE_CATEGORY_ID).catch(() => null);
+                const archiveCategory = await getAvailablePortfolioCategory(guild, "archive");
+                const adminArchiveCategory = await getAvailablePortfolioCategory(guild, "adminArchive");
                 const adminChannel = await findPortfolioAdminChannel(guild, userId, true);
-                if (archiveCategory?.type === ChannelType.GuildCategory) {
+                if (archiveCategory) {
                     await channel.setParent(archiveCategory.id, { lockPermissions: false }).catch(() => null);
-                    if (adminChannel && adminChannel.parentId !== archiveCategory.id) {
-                        await adminChannel.setParent(archiveCategory.id, { lockPermissions: false }).catch(() => null);
+                    if (adminChannel && adminArchiveCategory && adminChannel.parentId !== adminArchiveCategory.id) {
+                        await adminChannel.setParent(adminArchiveCategory.id, { lockPermissions: false }).catch(() => null);
                     }
                 }
                 await channel.permissionOverwrites.delete(userId).catch(() => null);
@@ -5600,10 +5716,9 @@ async function restoreLegacyPortfolioChannels(guild) {
         const userId = extractPortfolioUserId(channel.topic);
         const member = await guild.members.fetch(userId).catch(() => null);
         const hasPortfolioRole = Boolean(member?.roles.cache.has(PERSONAL_REPORT_ROLE_ID));
-        const targetCategoryId = hasPortfolioRole ? PERSONAL_REPORT_CATEGORY_ID : PERSONAL_REPORT_ARCHIVE_CATEGORY_ID;
-        const targetCategory = await guild.channels.fetch(targetCategoryId).catch(() => null);
+        const targetCategory = await getAvailablePortfolioCategory(guild, hasPortfolioRole ? "active" : "archive");
 
-        if (targetCategory?.type === ChannelType.GuildCategory && channel.parentId !== targetCategory.id) {
+        if (targetCategory && channel.parentId !== targetCategory.id) {
             await channel.setParent(targetCategory.id, { lockPermissions: false }).catch(() => null);
         }
 
@@ -5653,11 +5768,7 @@ async function ensurePersonalReportCategoryAccess(guild) {
     if (!guild || guild.id !== "1458190222042075251") return;
     await guild.channels.fetch().catch(() => null);
 
-    const categoryIds = [
-        PERSONAL_REPORT_CATEGORY_ID,
-        PERSONAL_REPORT_ARCHIVE_CATEGORY_ID,
-        SERVERS[guild.id]?.CHANNELS?.PORTFOLIO_CATEGORY
-    ].filter(Boolean);
+    const categoryIds = portfolioCategoryIds(guild);
 
     for (const categoryId of [...new Set(categoryIds)]) {
         const category = await guild.channels.fetch(categoryId).catch(() => null);
