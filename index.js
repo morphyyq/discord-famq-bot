@@ -5270,6 +5270,7 @@ const PERSONAL_REPORT_HIGH_RANK_ROLE_ID = "1458484199735689299";
 const PERSONAL_REPORT_TOPIC_PREFIX = "darkness-personal-report:";
 const PORTFOLIO_TOPIC_PREFIX = "portfolio_";
 const PERSONAL_REPORT_FORUM_ID = "1543149973044990062"; // legacy forum, migration source only
+const PORTFOLIO_ADMIN_TOPIC_PREFIX = "darkness-portfolio-admin:";
 const PORTFOLIO_CATEGORY_NAME = "Портфели";
 const PORTFOLIO_ARCHIVE_CATEGORY_NAME = "Архив портфелей";
 const DISCORD_CATEGORY_CHANNEL_LIMIT = 50;
