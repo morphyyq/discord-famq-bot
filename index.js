@@ -2984,7 +2984,7 @@ Main состав — основа нашей семьи. Здесь играю�
                                 },
                                 {
                                     type: 10, // Text Display — серая линия через markdown цитату
-                                    content: "> 🏖️ **Отпуск** — взять долгосрочный отпуск, отдых от игры.\n> 🎬 **Откат** — открыть гайд по оформлению отката.\n> 📋 **РП отчёт** — информация по РП отчётам и скринам ГТ, разгон, грин."
+                                    content: "> 🏖️ **Отпуск** — взять долгосрочный отпуск, отдых от игры.\n> 💼 **Портфель** — кнопка «Портфель» открывает ваш личный портфель.\n> 📋 **РП отчёт** — информация по РП отчётам и скринам ГТ, разгон, грин."
                                 },
                                 {
                                     type: 1, // Action Row
@@ -2999,9 +2999,9 @@ Main состав — основа нашей семьи. Здесь играю�
                                         {
                                             type: 2,
                                             style: 2,
-                                            label: "Откат",
-                                            custom_id: "interaction_otkat",
-                                            emoji: { name: "🎬" }
+                                            label: "Портфель",
+                                            custom_id: "interaction_portfolio",
+                                            emoji: { name: "💼" }
                                         },
                                         {
                                             type: 2,
@@ -3948,7 +3948,16 @@ Main состав — основа нашей семьи. Здесь играю�
                 await portfolioChannel.send({ embeds: [portfolioEmbed] }).catch(() => null);
             }
 
-            await i.editReply({ content: `✅ Ваш портфель создан: ${portfolioChannel}` });
+            const openPortfolioRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setLabel("Открыть портфель")
+                    .setStyle(ButtonStyle.Link)
+                    .setURL(`https://discord.com/channels/${i.guild.id}/${portfolioChannel.id}`)
+            );
+            await i.editReply({
+                content: `✅ Ваш портфель готов: ${portfolioChannel}`,
+                components: [openPortfolioRow]
+            });
             return;
         }
 
