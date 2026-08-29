@@ -32,6 +32,7 @@ const {
     TextDisplayBuilder,
     SeparatorBuilder,
     MessageFlags,
+    PermissionFlagsBits,
     AuditLogEvent
 } = require("discord.js");
 
@@ -1119,6 +1120,10 @@ client.once(Events.ClientReady, async () => {
             .setName("shop_panel")
             .setDescription("Отправить панель семейного магазина баллов")
             .setDefaultMemberPermissions(0),
+        new SlashCommandBuilder()
+            .setName("portfolio_panel")
+            .setDescription("Отправить панель управления портфелями для администраторов")
+            .setDefaultMemberPermissions(0),
 
         new SlashCommandBuilder()
             .setName("clear_roles")
@@ -1179,8 +1184,9 @@ client.once(Events.ClientReady, async () => {
         await updateOnlineMonitor();
         await updateAFKEmbed(mainGuild);
         await ensureAllLogThreads(mainGuild);
-        await ensurePersonalReportForumAccess(mainGuild);
-        await migrateLegacyPortfolioChannels(mainGuild);
+        await ensurePersonalReportCategoryAccess(mainGuild);
+        await migrateForumPortfoliosToChannels(mainGuild);
+        await restoreLegacyPortfolioChannels(mainGuild);
         await initPersonalReportChannels(mainGuild);
         await initVoiceSessions(mainGuild);
     }
@@ -3769,17 +3775,64 @@ Main состав — основа нашей семьи. Здесь играю�
         }
 
         // =====================================================
-        // ПОРТФЕЛЬ — создать пост в общем форуме
+        // АДМИН-ПАНЕЛЬ ПОРТФЕЛЕЙ — приватные каналы
+        // =====================================================
+        if (i.commandName === "portfolio_panel") {
+            await i.deferReply({ flags: MessageFlags.Ephemeral });
+
+            if (!hasPortfolioAdminAccess(i)) {
+                await i.editReply({ content: "❌ У вас нет доступа к панели портфелей." });
+                return;
+            }
+
+            const panelChannel = await i.guild.channels.fetch(PORTFOLIO_ADMIN_PANEL_CHANNEL_ID).catch(() => null);
+            if (!panelChannel || !panelChannel.isTextBased()) {
+                await i.editReply({ content: "❌ Канал админ-панели портфелей не найден." });
+                return;
+            }
+
+            await ensurePortfolioAdminPanelAccess(i.guild);
+            const panelContainer = await buildPortfolioAdminPanelContainer(i.guild, 0);
+            await panelChannel.send({
+                components: [panelContainer],
+                flags: MessageFlags.IsComponentsV2,
+                allowedMentions: { parse: [] }
+            });
+
+            await i.editReply({ content: "✅ Админ-панель портфелей отправлена." });
+            return;
+        }
+
+        if (i.isButton() && (i.customId.startsWith("portfolio_admin_prev_") || i.customId.startsWith("portfolio_admin_next_"))) {
+            if (!hasPortfolioAdminAccess(i)) {
+                await i.reply({ content: "❌ У вас нет доступа к этой панели.", flags: MessageFlags.Ephemeral }).catch(() => null);
+                return;
+            }
+
+            const direction = i.customId.startsWith("portfolio_admin_next_") ? 1 : -1;
+            const currentPage = Number(i.customId.split("_").pop()) || 0;
+            const nextPage = Math.max(0, currentPage + direction);
+            const panelContainer = await buildPortfolioAdminPanelContainer(i.guild, nextPage);
+            await i.update({
+                components: [panelContainer],
+                flags: MessageFlags.IsComponentsV2,
+                allowedMentions: { parse: [] }
+            });
+            return;
+        }
+
+        // =====================================================
+        // ПОРТФЕЛЬ — создать приватный канал для игрока
         // =====================================================
         if (i.isButton() && i.customId === "interaction_portfolio") {
             await i.deferReply({ flags: MessageFlags.Ephemeral });
 
             const member = await i.guild.members.fetch(i.user.id).catch(() => null);
-            const result = member ? await ensurePortfolioThread(member) : null;
-            const portfolioThread = result?.thread || null;
+            const result = member ? await ensurePrivatePortfolioChannel(member) : null;
+            const portfolioChannel = result?.channel || null;
 
-            if (!portfolioThread) {
-                await i.editReply({ content: "❌ Не удалось создать пост портфеля. Проверьте права бота и наличие форума." });
+            if (!portfolioChannel) {
+                await i.editReply({ content: "❌ Не удалось создать портфель. Проверьте права бота и наличие категории портфелей." });
                 return;
             }
 
@@ -3797,16 +3850,10 @@ Main состав — основа нашей семьи. Здесь играю�
                     .setColor("#2b2d31")
                     .setTimestamp();
 
-                await portfolioThread.send({ embeds: [portfolioEmbed] }).catch(() => null);
-                if (curatorId) {
-                    await portfolioThread.send({
-                        content: `Куратор портфеля: <@${curatorId}>`,
-                        allowedMentions: { parse: [] }
-                    }).catch(() => null);
-                }
+                await portfolioChannel.send({ embeds: [portfolioEmbed] }).catch(() => null);
             }
 
-            await i.editReply({ content: `✅ Ваш портфель создан в форуме: ${portfolioThread}` });
+            await i.editReply({ content: `✅ Ваш портфель создан: ${portfolioChannel}` });
             return;
         }
 
@@ -5145,13 +5192,15 @@ ${data.q5}
 // =====================================================
 const DEDUCT_ROLE_ID = "1458410670071615580";
 const PERSONAL_REPORT_ROLE_ID = "1458410756453306490";
-const PERSONAL_REPORT_FORUM_ID = "1543149973044990062";
-const PERSONAL_REPORT_CATEGORY_ID = "1540292539943485450"; // legacy
-const PERSONAL_REPORT_ARCHIVE_CATEGORY_ID = "1541144152689999932"; // legacy
+const PERSONAL_REPORT_CATEGORY_ID = "1540292539943485450";
+const PERSONAL_REPORT_ARCHIVE_CATEGORY_ID = "1541144152689999932";
 const PERSONAL_REPORT_VIEW_ROLE_ID = "1541082447293452450";
 const PERSONAL_REPORT_HIGH_RANK_ROLE_ID = "1458484199735689299";
 const PERSONAL_REPORT_TOPIC_PREFIX = "darkness-personal-report:";
 const PORTFOLIO_TOPIC_PREFIX = "portfolio_";
+const PERSONAL_REPORT_FORUM_ID = "1543149973044990062"; // legacy forum, migration source only
+const PORTFOLIO_ADMIN_PANEL_CHANNEL_ID = "1543177207843913798";
+const PORTFOLIO_ADMIN_PAGE_SIZE = 20;
 
 function personalReportNoticePayload({ userId, title, message, color = 0xE74C3C, mentionHighRank = true }) {
     const container = new ContainerBuilder()
@@ -5179,88 +5228,124 @@ function personalReportChannelName(member) {
     return rawName;
 }
 
-function portfolioThreadName(userId) {
-    return `portfolio-${userId}`;
+function extractPortfolioUserId(topic) {
+    const value = String(topic || "");
+    if (value.startsWith(PERSONAL_REPORT_TOPIC_PREFIX)) return value.replace(PERSONAL_REPORT_TOPIC_PREFIX, "");
+    if (value.startsWith(PORTFOLIO_TOPIC_PREFIX)) return value.replace(PORTFOLIO_TOPIC_PREFIX, "");
+    return null;
 }
 
-async function getPortfolioForum(guild) {
-    if (!guild || guild.id !== "1458190222042075251") return null;
-    const forum = await guild.channels.fetch(PERSONAL_REPORT_FORUM_ID).catch(() => null);
-    return forum?.type === ChannelType.GuildForum ? forum : null;
-}
-
-async function fetchPortfolioThreads(forum) {
-    if (!forum) return [];
-    const active = await forum.threads.fetchActive().catch(() => null);
-    const archived = await forum.threads.fetchArchived({ type: "public", limit: 100 }).catch(() => null);
-    const threads = [
-        ...Array.from(active?.threads?.values?.() || []),
-        ...Array.from(archived?.threads?.values?.() || [])
-    ];
-    return [...new Map(threads.map(thread => [thread.id, thread])).values()];
-}
-
-async function findPortfolioThread(guild, userId, refresh = false) {
-    const forum = await getPortfolioForum(guild);
-    if (!forum) return null;
-    if (refresh) await guild.channels.fetch().catch(() => null);
-
-    const expectedName = portfolioThreadName(userId);
-    const threads = await fetchPortfolioThreads(forum);
-    return threads.find(thread => thread.name === expectedName) || null;
-}
-
-async function createPortfolioThread(guild, userId, member = null) {
-    const forum = await getPortfolioForum(guild);
-    if (!forum) {
-        console.error(`[PORTFOLIO] Форум ${PERSONAL_REPORT_FORUM_ID} не найден.`);
-        return null;
-    }
-
-    const displayName = member?.user?.username || member?.displayName || userId;
-    const intro = personalReportNoticePayload({
-        userId,
-        title: "💼 Личный портфель",
-        message: `**Владелец:** <@${userId}>\n\nПост портфеля создан автоматически. Здесь будут храниться РП-отчёты, откаты и история участника.`,
-        color: 0x2B2D31,
-        mentionHighRank: false
-    });
-
-    return forum.threads.create({
-        name: portfolioThreadName(userId),
-        message: intro,
-        reason: `Создание портфеля ${displayName}`
-    }).catch(error => {
-        console.error("[PORTFOLIO THREAD CREATE ERROR]", error);
-        return null;
-    });
-}
-
-async function ensurePortfolioThread(member, { unarchive = true } = {}) {
-    const guild = member?.guild;
-    if (!guild || guild.id !== "1458190222042075251") return { thread: null, created: false };
-
-    let thread = await findPortfolioThread(guild, member.id, true);
-    let created = false;
-    if (!thread) {
-        thread = await createPortfolioThread(guild, member.id, member);
-        created = !!thread;
-    }
-
-    if (thread && unarchive && thread.archived) {
-        await thread.setArchived(false).catch(() => null);
-    }
-
-    return { thread, created };
+function portfolioCategoryIds(guild) {
+    return [
+        PERSONAL_REPORT_CATEGORY_ID,
+        PERSONAL_REPORT_ARCHIVE_CATEGORY_ID,
+        SERVERS[guild?.id]?.CHANNELS?.PORTFOLIO_CATEGORY
+    ].filter(Boolean);
 }
 
 async function findPersonalReportChannel(guild, userId, refresh = false) {
-    return findPortfolioThread(guild, userId, refresh);
+    if (!guild || guild.id !== "1458190222042075251") return null;
+    if (refresh) await guild.channels.fetch().catch(() => null);
+
+    return guild.channels.cache.find(channel =>
+        channel.type === ChannelType.GuildText &&
+        portfolioCategoryIds(guild).includes(channel.parentId) &&
+        extractPortfolioUserId(channel.topic) === String(userId)
+    ) || null;
+}
+
+async function createPrivatePortfolioChannel(member, topicPrefix = PORTFOLIO_TOPIC_PREFIX) {
+    const guild = member?.guild;
+    if (!guild || guild.id !== "1458190222042075251") return null;
+
+    const category = await guild.channels.fetch(PERSONAL_REPORT_CATEGORY_ID).catch(() => null);
+    if (!category || category.type !== ChannelType.GuildCategory) {
+        console.error(`[PORTFOLIO] Категория ${PERSONAL_REPORT_CATEGORY_ID} не найдена.`);
+        return null;
+    }
+
+    const permissionOverwrites = [
+        { id: guild.id, deny: ["ViewChannel"] },
+        { id: member.id, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory", "AttachFiles"] },
+        { id: PERSONAL_REPORT_VIEW_ROLE_ID, allow: ["ViewChannel", "ReadMessageHistory"] },
+        { id: PERSONAL_REPORT_HIGH_RANK_ROLE_ID, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory"] },
+        { id: client.user.id, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory", "ManageChannels", "ManageMessages"] }
+    ];
+
+    const channel = await guild.channels.create({
+        name: personalReportChannelName(member),
+        type: ChannelType.GuildText,
+        parent: category.id,
+        topic: `${topicPrefix}${member.id}`,
+        permissionOverwrites
+    }).catch(error => {
+        console.error("[PORTFOLIO CREATE ERROR]", error);
+        return null;
+    });
+
+    if (channel) {
+        await channel.send(personalReportNoticePayload({
+            userId: member.id,
+            title: "💼 Личный портфель",
+            message: `**Владелец:** <@${member.id}>\n\nЗдесь хранится история участника, РП-отчёты и другие записи портфеля.`,
+            color: 0x2B2D31,
+            mentionHighRank: false
+        })).catch(() => null);
+    }
+
+    return channel;
+}
+
+async function ensurePrivatePortfolioChannel(member, { restoreFromArchive = false } = {}) {
+    const guild = member?.guild;
+    if (!guild || guild.id !== "1458190222042075251") return { channel: null, created: false };
+
+    let channel = await findPersonalReportChannel(guild, member.id, true);
+    let created = false;
+    if (!channel) {
+        channel = await createPrivatePortfolioChannel(member);
+        created = !!channel;
+    }
+
+    if (!channel) return { channel: null, created: false };
+
+    const activeCategory = await guild.channels.fetch(PERSONAL_REPORT_CATEGORY_ID).catch(() => null);
+    const archiveCategory = await guild.channels.fetch(PERSONAL_REPORT_ARCHIVE_CATEGORY_ID).catch(() => null);
+    const isInArchive = channel.parentId === archiveCategory?.id;
+    const shouldRestore = restoreFromArchive || !isInArchive;
+
+    if (shouldRestore && activeCategory?.type === ChannelType.GuildCategory && channel.parentId !== activeCategory.id) {
+        await channel.setParent(activeCategory.id, { lockPermissions: false }).catch(() => null);
+    }
+
+    if (channel.name !== personalReportChannelName(member)) {
+        await channel.setName(personalReportChannelName(member)).catch(() => null);
+    }
+
+    if (shouldRestore) {
+        await channel.permissionOverwrites.edit(member.id, {
+            ViewChannel: true,
+            SendMessages: true,
+            ReadMessageHistory: true,
+            AttachFiles: true
+        }).catch(() => null);
+    }
+    await channel.permissionOverwrites.edit(PERSONAL_REPORT_VIEW_ROLE_ID, {
+        ViewChannel: true,
+        ReadMessageHistory: true
+    }).catch(() => null);
+    await channel.permissionOverwrites.edit(PERSONAL_REPORT_HIGH_RANK_ROLE_ID, {
+        ViewChannel: true,
+        SendMessages: true,
+        ReadMessageHistory: true
+    }).catch(() => null);
+
+    return { channel, created };
 }
 
 async function ensurePersonalReportChannel(member) {
-    const result = await ensurePortfolioThread(member, { unarchive: true });
-    return result.thread;
+    const result = await ensurePrivatePortfolioChannel(member, { restoreFromArchive: true });
+    return result.channel;
 }
 
 function componentsContainText(components, text) {
@@ -5273,66 +5358,75 @@ function componentsContainText(components, text) {
 }
 
 async function deletePersonalReportRoleLostNotice(guild, userId) {
-    const thread = await findPortfolioThread(guild, userId, true);
-    if (!thread) return;
+    const channel = await findPersonalReportChannel(guild, userId, true);
+    if (!channel) return;
 
-    const messages = await thread.messages.fetch({ limit: 100 }).catch(() => null);
+    const messages = await channel.messages.fetch({ limit: 100 }).catch(() => null);
     if (!messages) return;
 
     const notices = messages.filter(message =>
         message.author?.id === client.user.id &&
         componentsContainText(message.components, "Роль участника снята")
     );
-
     for (const notice of notices.values()) {
         await notice.delete().catch(() => null);
     }
 }
 
 async function notifyPersonalReportRoleLost(guild, userId, reason) {
-    const thread = await findPortfolioThread(guild, userId, true);
-    if (!thread) return;
+    const channel = await findPersonalReportChannel(guild, userId, true);
+    if (!channel) return;
 
-    if (thread.archived) await thread.setArchived(false).catch(() => null);
-
-    await thread.send(personalReportNoticePayload({
+    await channel.send(personalReportNoticePayload({
         userId,
         title: reason === "leave" ? "📤 Участник вышел с сервера" : "⚠️ Роль участника снята",
         message: reason === "leave"
-            ? `<@${userId}> вышел с сервера. Пост портфеля отправлен в архив.\n\n<@&${PERSONAL_REPORT_HIGH_RANK_ROLE_ID}> требуется учесть это в кадровом составе.`
-            : `<@${userId}> потерял роль <@&${PERSONAL_REPORT_ROLE_ID}>. Пост портфеля отправлен в архив.\n\n<@&${PERSONAL_REPORT_HIGH_RANK_ROLE_ID}> требуется проверить участника.`,
+            ? `<@${userId}> вышел с сервера. Портфель перенесён в архив.\n\n<@&${PERSONAL_REPORT_HIGH_RANK_ROLE_ID}> требуется учесть это в кадровом составе.`
+            : `<@${userId}> потерял роль <@&${PERSONAL_REPORT_ROLE_ID}>. Портфель перенесён в архив.\n\n<@&${PERSONAL_REPORT_HIGH_RANK_ROLE_ID}> требуется проверить участника.`,
         color: 0xE74C3C,
         mentionHighRank: true
     })).catch(() => null);
 
-    // В форуме архивом является архивирование поста, сам пост и история сохраняются.
-    await thread.setArchived(true).catch(() => null);
+    const archiveCategory = await guild.channels.fetch(PERSONAL_REPORT_ARCHIVE_CATEGORY_ID).catch(() => null);
+    if (archiveCategory?.type === ChannelType.GuildCategory && channel.parentId !== archiveCategory.id) {
+        await channel.setParent(archiveCategory.id, { lockPermissions: false }).catch(() => null);
+    }
+    await channel.permissionOverwrites.delete(userId).catch(() => null);
 }
 
-async function migrateLegacyPortfolioChannels(guild) {
+async function migrateForumPortfoliosToChannels(guild) {
     if (!guild || guild.id !== "1458190222042075251") return;
-    await guild.channels.fetch().catch(() => null);
+    const forum = await guild.channels.fetch(PERSONAL_REPORT_FORUM_ID).catch(() => null);
+    if (!forum || forum.type !== ChannelType.GuildForum) return;
 
-    const legacyChannels = guild.channels.cache.filter(channel =>
-        channel.type === ChannelType.GuildText &&
-        [PERSONAL_REPORT_CATEGORY_ID, PERSONAL_REPORT_ARCHIVE_CATEGORY_ID, SERVERS[guild.id]?.CHANNELS?.PORTFOLIO_CATEGORY].includes(channel.parentId) &&
-        (String(channel.topic || "").startsWith(PERSONAL_REPORT_TOPIC_PREFIX) || String(channel.topic || "").startsWith(PORTFOLIO_TOPIC_PREFIX))
-    );
+    const active = await forum.threads.fetchActive().catch(() => null);
+    const archived = await forum.threads.fetchArchived({ type: "public", limit: 100 }).catch(() => null);
+    const threads = [
+        ...Array.from(active?.threads?.values?.() || []),
+        ...Array.from(archived?.threads?.values?.() || [])
+    ];
 
-    for (const legacyChannel of legacyChannels.values()) {
-        const topic = String(legacyChannel.topic || "");
-        const userId = topic.startsWith(PERSONAL_REPORT_TOPIC_PREFIX)
-            ? topic.replace(PERSONAL_REPORT_TOPIC_PREFIX, "")
-            : topic.replace(PORTFOLIO_TOPIC_PREFIX, "");
-        if (!/^\d{15,25}$/.test(userId)) continue;
+    for (const thread of [...new Map(threads.map(item => [item.id, item])).values()]) {
+        const match = String(thread.name || "").match(/^portfolio-(\d{15,25})$/);
+        if (!match) continue;
+        const userId = match[1];
 
-        let thread = await findPortfolioThread(guild, userId, true);
-        if (!thread) {
+        let channel = await findPersonalReportChannel(guild, userId, true);
+        if (!channel) {
             const member = await guild.members.fetch(userId).catch(() => null);
-            thread = await createPortfolioThread(guild, userId, member);
-            if (!thread) continue;
+            if (!member) continue;
+            channel = await createPrivatePortfolioChannel(member);
+            if (!channel) continue;
 
-            const messages = await legacyChannel.messages.fetch({ limit: 100 }).catch(() => null);
+            if (thread.archived) {
+                const archiveCategory = await guild.channels.fetch(PERSONAL_REPORT_ARCHIVE_CATEGORY_ID).catch(() => null);
+                if (archiveCategory?.type === ChannelType.GuildCategory) {
+                    await channel.setParent(archiveCategory.id, { lockPermissions: false }).catch(() => null);
+                }
+                await channel.permissionOverwrites.delete(userId).catch(() => null);
+            }
+
+            const messages = await thread.messages.fetch({ limit: 100 }).catch(() => null);
             if (messages) {
                 const orderedMessages = [...messages.values()].sort((a, b) => a.createdTimestamp - b.createdTimestamp);
                 for (const message of orderedMessages) {
@@ -5341,7 +5435,7 @@ async function migrateLegacyPortfolioChannels(guild) {
                             const components = message.components.map(component =>
                                 typeof component.toJSON === "function" ? component.toJSON() : component
                             );
-                            await thread.send({
+                            await channel.send({
                                 components,
                                 flags: MessageFlags.IsComponentsV2,
                                 allowedMentions: { parse: [] }
@@ -5349,46 +5443,108 @@ async function migrateLegacyPortfolioChannels(guild) {
                         } else {
                             const attachmentLinks = [...message.attachments.values()].map(attachment => attachment.url);
                             const content = [message.content, ...attachmentLinks].filter(Boolean).join("\n");
-                            if (content) {
-                                await thread.send({ content, allowedMentions: { parse: [] } });
-                            }
+                            if (content) await channel.send({ content, allowedMentions: { parse: [] } });
                         }
                     } catch (error) {
-                        console.error(`[PORTFOLIO MIGRATION MESSAGE ERROR] ${legacyChannel.id}`, error);
+                        console.error(`[PORTFOLIO MIGRATION MESSAGE ERROR] ${thread.id}`, error);
                     }
                 }
             }
         }
 
-        // Старый канал оставляем как резервную копию, но закрываем его для обычного просмотра.
-        await legacyChannel.permissionOverwrites.edit(guild.id, { ViewChannel: false }).catch(() => null);
+        await thread.setArchived(true).catch(() => null);
     }
 }
 
-async function ensurePersonalReportForumAccess(guild) {
-    const forum = await getPortfolioForum(guild);
-    if (!forum) {
-        console.error(`[PORTFOLIO] Форум ${PERSONAL_REPORT_FORUM_ID} не найден.`);
-        return;
-    }
+async function restoreLegacyPortfolioChannels(guild) {
+    if (!guild || guild.id !== "1458190222042075251") return;
+    await guild.channels.fetch().catch(() => null);
 
-    await forum.permissionOverwrites.edit(guild.id, { ViewChannel: false }).catch(() => null);
-    await forum.permissionOverwrites.edit(PERSONAL_REPORT_VIEW_ROLE_ID, {
-        ViewChannel: true,
-        ReadMessageHistory: true
-    }).catch(() => null);
-    await forum.permissionOverwrites.edit(PERSONAL_REPORT_HIGH_RANK_ROLE_ID, {
-        ViewChannel: true,
-        SendMessages: true,
-        ReadMessageHistory: true
-    }).catch(() => null);
-    await forum.permissionOverwrites.edit(client.user.id, {
-        ViewChannel: true,
-        SendMessages: true,
-        ReadMessageHistory: true,
-        ManageThreads: true,
-        ManageMessages: true
-    }).catch(() => null);
+    const legacyCategoryId = SERVERS[guild.id]?.CHANNELS?.PORTFOLIO_CATEGORY;
+    if (!legacyCategoryId) return;
+
+    const legacyChannels = guild.channels.cache.filter(channel =>
+        channel.type === ChannelType.GuildText &&
+        channel.parentId === legacyCategoryId &&
+        extractPortfolioUserId(channel.topic)
+    );
+
+    for (const channel of legacyChannels.values()) {
+        const userId = extractPortfolioUserId(channel.topic);
+        const member = await guild.members.fetch(userId).catch(() => null);
+        const hasPortfolioRole = Boolean(member?.roles.cache.has(PERSONAL_REPORT_ROLE_ID));
+        const targetCategoryId = hasPortfolioRole ? PERSONAL_REPORT_CATEGORY_ID : PERSONAL_REPORT_ARCHIVE_CATEGORY_ID;
+        const targetCategory = await guild.channels.fetch(targetCategoryId).catch(() => null);
+
+        if (targetCategory?.type === ChannelType.GuildCategory && channel.parentId !== targetCategory.id) {
+            await channel.setParent(targetCategory.id, { lockPermissions: false }).catch(() => null);
+        }
+
+        await channel.permissionOverwrites.edit(PERSONAL_REPORT_VIEW_ROLE_ID, {
+            ViewChannel: true,
+            ReadMessageHistory: true
+        }).catch(() => null);
+        await channel.permissionOverwrites.edit(PERSONAL_REPORT_HIGH_RANK_ROLE_ID, {
+            ViewChannel: true,
+            SendMessages: true,
+            ReadMessageHistory: true
+        }).catch(() => null);
+
+        if (hasPortfolioRole && member) {
+            await channel.permissionOverwrites.edit(member.id, {
+                ViewChannel: true,
+                SendMessages: true,
+                ReadMessageHistory: true,
+                AttachFiles: true
+            }).catch(() => null);
+        } else {
+            await channel.permissionOverwrites.delete(userId).catch(() => null);
+        }
+    }
+}
+
+async function ensurePersonalReportCategoryAccess(guild) {
+    if (!guild || guild.id !== "1458190222042075251") return;
+    await guild.channels.fetch().catch(() => null);
+
+    const categoryIds = [
+        PERSONAL_REPORT_CATEGORY_ID,
+        PERSONAL_REPORT_ARCHIVE_CATEGORY_ID,
+        SERVERS[guild.id]?.CHANNELS?.PORTFOLIO_CATEGORY
+    ].filter(Boolean);
+
+    for (const categoryId of [...new Set(categoryIds)]) {
+        const category = await guild.channels.fetch(categoryId).catch(() => null);
+        if (!category || category.type !== ChannelType.GuildCategory) {
+            console.error(`[PERSONAL REPORT] Категория ${categoryId} не найдена.`);
+            continue;
+        }
+
+        await category.permissionOverwrites.edit(PERSONAL_REPORT_VIEW_ROLE_ID, {
+            ViewChannel: true,
+            ReadMessageHistory: true
+        }).catch(() => null);
+        await category.permissionOverwrites.edit(PERSONAL_REPORT_HIGH_RANK_ROLE_ID, {
+            ViewChannel: true,
+            SendMessages: true,
+            ReadMessageHistory: true
+        }).catch(() => null);
+
+        const channels = guild.channels.cache.filter(channel =>
+            channel.type === ChannelType.GuildText && channel.parentId === category.id
+        );
+        for (const channel of channels.values()) {
+            await channel.permissionOverwrites.edit(PERSONAL_REPORT_VIEW_ROLE_ID, {
+                ViewChannel: true,
+                ReadMessageHistory: true
+            }).catch(() => null);
+            await channel.permissionOverwrites.edit(PERSONAL_REPORT_HIGH_RANK_ROLE_ID, {
+                ViewChannel: true,
+                SendMessages: true,
+                ReadMessageHistory: true
+            }).catch(() => null);
+        }
+    }
 }
 
 async function initPersonalReportChannels(guild) {
@@ -5399,6 +5555,97 @@ async function initPersonalReportChannels(guild) {
             await ensurePersonalReportChannel(member);
         }
     }
+}
+
+function hasPortfolioAdminAccess(interaction) {
+    return Boolean(
+        interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
+        interaction.member?.roles?.cache?.has(PERSONAL_REPORT_VIEW_ROLE_ID) ||
+        interaction.member?.roles?.cache?.has(PERSONAL_REPORT_HIGH_RANK_ROLE_ID)
+    );
+}
+
+async function listPortfolioChannels(guild) {
+    await guild.channels.fetch().catch(() => null);
+    const channels = guild.channels.cache.filter(channel =>
+        channel.type === ChannelType.GuildText &&
+        portfolioCategoryIds(guild).includes(channel.parentId) &&
+        extractPortfolioUserId(channel.topic)
+    );
+
+    return [...new Map(
+        channels.map(channel => [extractPortfolioUserId(channel.topic), channel])
+    ).values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function ensurePortfolioAdminPanelAccess(guild) {
+    const panelChannel = await guild.channels.fetch(PORTFOLIO_ADMIN_PANEL_CHANNEL_ID).catch(() => null);
+    if (!panelChannel?.permissionOverwrites) return;
+
+    await panelChannel.permissionOverwrites.edit(guild.id, { ViewChannel: false }).catch(() => null);
+    await panelChannel.permissionOverwrites.edit(PERSONAL_REPORT_VIEW_ROLE_ID, {
+        ViewChannel: true,
+        ReadMessageHistory: true
+    }).catch(() => null);
+    await panelChannel.permissionOverwrites.edit(PERSONAL_REPORT_HIGH_RANK_ROLE_ID, {
+        ViewChannel: true,
+        SendMessages: true,
+        ReadMessageHistory: true
+    }).catch(() => null);
+    await panelChannel.permissionOverwrites.edit(client.user.id, {
+        ViewChannel: true,
+        SendMessages: true,
+        ReadMessageHistory: true,
+        ManageMessages: true
+    }).catch(() => null);
+}
+
+async function buildPortfolioAdminPanelContainer(guild, requestedPage = 0) {
+    const channels = await listPortfolioChannels(guild);
+    const totalPages = Math.max(1, Math.ceil(channels.length / PORTFOLIO_ADMIN_PAGE_SIZE));
+    const page = Math.min(Math.max(Number(requestedPage) || 0, 0), totalPages - 1);
+    const pageChannels = channels.slice(page * PORTFOLIO_ADMIN_PAGE_SIZE, (page + 1) * PORTFOLIO_ADMIN_PAGE_SIZE);
+
+    const container = new ContainerBuilder()
+        .setAccentColor(0x2B2D31)
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(
+            `# Панель портфелей\n-# Выберите ник — откроется приватный портфель\n-# Страница ${page + 1} из ${totalPages}`
+        ))
+        .addSeparatorComponents(new SeparatorBuilder());
+
+    if (!pageChannels.length) {
+        container.addTextDisplayComponents(new TextDisplayBuilder().setContent("*Портфелей пока нет.*"));
+    } else {
+        for (let index = 0; index < pageChannels.length; index += 5) {
+            const row = new ActionRowBuilder().addComponents(
+                ...pageChannels.slice(index, index + 5).map(channel =>
+                    new ButtonBuilder()
+                        .setLabel(channel.name.slice(0, 80))
+                        .setStyle(ButtonStyle.Link)
+                        .setURL(`https://discord.com/channels/${guild.id}/${channel.id}`)
+                )
+            );
+            container.addActionRowComponents(row);
+        }
+    }
+
+    if (totalPages > 1) {
+        const navigationRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`portfolio_admin_prev_${page}`)
+                .setLabel("Назад")
+                .setStyle(ButtonStyle.Secondary)
+                .setDisabled(page === 0),
+            new ButtonBuilder()
+                .setCustomId(`portfolio_admin_next_${page}`)
+                .setLabel("Далее")
+                .setStyle(ButtonStyle.Secondary)
+                .setDisabled(page >= totalPages - 1)
+        );
+        container.addSeparatorComponents(new SeparatorBuilder()).addActionRowComponents(navigationRow);
+    }
+
+    return container;
 }
 
 async function sendRpReportToPersonalChannel(guild, userId, rpData, evidenceUrl) {
