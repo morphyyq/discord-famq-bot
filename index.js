@@ -3809,24 +3809,32 @@ Main состав — основа нашей семьи. Здесь играю�
                 return;
             }
 
-            await i.deferUpdate().catch(() => null);
+            try {
+                await i.deferUpdate();
+            } catch (error) {
+                if (error?.code !== 10062) console.error("[PORTFOLIO PANEL ACK ERROR]", error);
+                return;
+            }
+
             const direction = i.customId.startsWith("portfolio_admin_next_") ? 1 : -1;
             const currentPage = Number(i.customId.split("_").pop()) || 0;
             const nextPage = Math.max(0, currentPage + direction);
 
             try {
                 const panelContainer = await buildPortfolioAdminPanelContainer(i.guild, nextPage);
-                await i.editReply({
+                await i.message.edit({
                     components: [panelContainer],
                     flags: MessageFlags.IsComponentsV2,
                     allowedMentions: { parse: [] }
                 });
             } catch (error) {
-                console.error("[PORTFOLIO PANEL PAGINATION ERROR]", error);
-                await i.editReply({
-                    content: "❌ Не удалось обновить страницу панели портфелей.",
-                    components: []
-                }).catch(() => null);
+                if (error?.code !== 10008) {
+                    console.error("[PORTFOLIO PANEL PAGINATION ERROR]", error);
+                    await i.followUp({
+                        content: "❌ Не удалось обновить страницу панели портфелей.",
+                        flags: MessageFlags.Ephemeral
+                    }).catch(() => null);
+                }
             }
             return;
         }
