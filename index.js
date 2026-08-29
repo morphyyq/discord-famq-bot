@@ -5495,13 +5495,7 @@ async function createPrivatePortfolioChannel(member, topicPrefix = PORTFOLIO_TOP
     });
 
     if (channel) {
-        await channel.send(personalReportNoticePayload({
-            userId: member.id,
-            title: "💼 Личный портфель",
-            message: `**Владелец:** <@${member.id}>\n\nЗдесь хранится история участника, РП-отчёты и другие записи портфеля.`,
-            color: 0x2B2D31,
-            mentionHighRank: false
-        })).catch(() => null);
+        await ensurePortfolioInfoPanel(member, channel);
     }
 
     return channel;
@@ -5545,6 +5539,7 @@ async function ensurePrivatePortfolioChannel(member) {
         ReadMessageHistory: true
     }).catch(() => null);
 
+    await ensurePortfolioInfoPanel(member, channel);
     await ensurePortfolioAdminThread(member, channel);
     return { channel, created };
 }
@@ -5552,6 +5547,51 @@ async function ensurePrivatePortfolioChannel(member) {
 async function ensurePersonalReportChannel(member) {
     const result = await ensurePrivatePortfolioChannel(member);
     return result.channel;
+}
+
+function buildPortfolioInfoPayload(member) {
+    const container = new ContainerBuilder()
+        .setAccentColor(0x2B2D31)
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent("## 📁 Личный канал отчётов"))
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(
+            `**Участник:** <@${member.id}>\n\n` +
+            `Сюда необходимо отправлять:\n` +
+            `• скрины;\n` +
+            `• откаты с каптов;\n` +
+            `• РП-отчёты;\n` +
+            `• откаты с арены;\n` +
+            `• подтверждения активности.`
+        ));
+
+    return {
+        components: [container],
+        flags: MessageFlags.IsComponentsV2,
+        allowedMentions: { parse: [] }
+    };
+}
+
+async function ensurePortfolioInfoPanel(member, channel) {
+    if (!member || !channel?.messages) return;
+    const messages = await channel.messages.fetch({ limit: 50 }).catch(() => null);
+    if (!messages) return;
+
+    const infoMessages = messages.filter(message =>
+        message.author?.id === client.user.id && (
+            componentsContainText(message.components, "Сюда необходимо отправлять") ||
+            message.embeds?.some(embed => String(embed.title || "").includes("Личный канал отчётов"))
+        )
+    );
+    const currentMessage = infoMessages.find(message =>
+        componentsContainText(message.components, "Сюда необходимо отправлять")
+    );
+
+    for (const message of infoMessages.values()) {
+        if (message.id !== currentMessage?.id) await message.delete().catch(() => null);
+    }
+    if (!currentMessage) {
+        await channel.send(buildPortfolioInfoPayload(member)).catch(() => null);
+    }
 }
 
 function componentsContainText(components, text) {
