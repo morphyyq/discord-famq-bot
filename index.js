@@ -1123,6 +1123,14 @@ client.once(Events.ClientReady, async () => {
             .setDescription("Отправить панель семейного магазина баллов")
             .setDefaultMemberPermissions(0),
         new SlashCommandBuilder()
+            .setName("portfolio_panel")
+            .setDescription("Призвать админ-панель портфеля")
+            .addUserOption(opt => opt
+                .setName("user")
+                .setDescription("Владелец портфеля")
+                .setRequired(false))
+            .setDefaultMemberPermissions(0),
+        new SlashCommandBuilder()
             .setName("clear_roles")
             .setDescription("Снять обычные роли со всех участников-людей")
             .setDefaultMemberPermissions(0),
@@ -3774,6 +3782,105 @@ Main состав — основа нашей семьи. Здесь играю�
         }
 
         // =====================================================
+        // АДМИН-ПАНЕЛЬ ПОРТФЕЛЯ — управление тиром
+        // =====================================================
+        if (i.isButton() && (i.customId.startsWith("portfolio_thread_tier_up_") || i.customId.startsWith("portfolio_thread_tier_down_"))) {
+            await i.deferReply({ flags: MessageFlags.Ephemeral });
+            if (!hasPortfolioAdminAccess(i)) {
+                await i.editReply({ content: "❌ У вас нет доступа к управлению тирами." });
+                return;
+            }
+
+            const isUp = i.customId.startsWith("portfolio_thread_tier_up_");
+            const prefix = isUp ? "portfolio_thread_tier_up_" : "portfolio_thread_tier_down_";
+            const userId = i.customId.replace(prefix, "");
+            const member = await i.guild.members.fetch(userId).catch(() => null);
+            if (!member) {
+                await i.editReply({ content: "❌ Пользователь не найден на сервере." });
+                return;
+            }
+
+            const currentTier = member.roles.cache.has(PORTFOLIO_TIER_A_ROLE_ID)
+                ? "A"
+                : member.roles.cache.has(PORTFOLIO_TIER_B_ROLE_ID)
+                    ? "B"
+                    : member.roles.cache.has(PORTFOLIO_TIER_C_ROLE_ID)
+                        ? "C"
+                        : "none";
+            const nextTier = isUp
+                ? ({ none: "C", C: "B", B: "A", A: null }[currentTier])
+                : ({ A: "B", B: "C", C: "none", none: null }[currentTier]);
+
+            if (!nextTier) {
+                await i.editReply({
+                    content: isUp
+                        ? "ℹ️ У пользователя уже максимальный тир A."
+                        : "ℹ️ У пользователя уже нет минимального тира C."
+                });
+                return;
+            }
+
+            await member.roles.remove(PORTFOLIO_TIER_ROLE_IDS).catch(() => null);
+            const nextRole = {
+                A: PORTFOLIO_TIER_A_ROLE_ID,
+                B: PORTFOLIO_TIER_B_ROLE_ID,
+                C: PORTFOLIO_TIER_C_ROLE_ID
+            }[nextTier];
+            if (nextRole) await member.roles.add(nextRole).catch(() => null);
+
+            const tierLabel = nextTier === "none" ? "без тира" : `тир ${nextTier}`;
+            await i.editReply({ content: `✅ Для <@${userId}> установлен **${tierLabel}**.` });
+            return;
+        }
+
+        // =====================================================
+        // КОМАНДА — призвать админ-панель портфеля
+        // =====================================================
+        if (i.commandName === "portfolio_panel") {
+            await i.deferReply({ flags: MessageFlags.Ephemeral });
+            if (!hasPortfolioAdminAccess(i)) {
+                await i.editReply({ content: "❌ У вас нет доступа к админ-панели портфелей." });
+                return;
+            }
+
+            const selectedUser = i.options.getUser("user");
+            let userId = selectedUser?.id || null;
+            let portfolioChannel = userId
+                ? await findPersonalReportChannel(i.guild, userId, true)
+                : null;
+
+            if (!portfolioChannel && i.channel?.topic) {
+                userId = extractPortfolioUserId(i.channel.topic);
+                portfolioChannel = userId ? i.channel : null;
+            }
+            if (!portfolioChannel && i.channel?.parentId) {
+                const parentChannel = await i.guild.channels.fetch(i.channel.parentId).catch(() => null);
+                userId = extractPortfolioUserId(parentChannel?.topic);
+                portfolioChannel = userId ? parentChannel : null;
+            }
+
+            if (!portfolioChannel || !userId) {
+                await i.editReply({ content: "❌ Укажите пользователя: `/portfolio_panel user:@пользователь`." });
+                return;
+            }
+
+            const member = await i.guild.members.fetch(userId).catch(() => null);
+            const thread = member ? await ensurePortfolioAdminThread(member, portfolioChannel) : null;
+            if (!thread) {
+                await i.editReply({ content: "❌ Не удалось создать или найти админ-ветку портфеля." });
+                return;
+            }
+
+            await thread.send({
+                components: [buildPortfolioAdminThreadContainer(userId, portfolioBaseChannelName(member))],
+                flags: MessageFlags.IsComponentsV2,
+                allowedMentions: { parse: [] }
+            }).catch(() => null);
+            await i.editReply({ content: `✅ Админ-панель призвана в ветке ${thread}.` });
+            return;
+        }
+
+        // =====================================================
         // НАЧИСЛЕНИЕ БАЛЛОВ ИЗ ПРИВАТНОЙ ВЕТКИ ПОРТФЕЛЯ
         // =====================================================
         if (i.isButton() && (i.customId.startsWith("portfolio_thread_reward_rp_") || i.customId.startsWith("portfolio_thread_reward_capt_"))) {
@@ -4950,7 +5057,7 @@ ${data.q5}
                     if (isAcademy) rolesToAdd = config.ACADEMY_ROLES;
                     else if (isMain) rolesToAdd = config.MAIN_ROLES;
                     else if (isRecruit) rolesToAdd = ["1468704257606684712"];
-                    else rolesToAdd = config.CAPTURE_ROLES;
+                    else rolesToAdd = [...new Set([...(config.CAPTURE_ROLES || []), PORTFOLIO_TIER_C_ROLE_ID])];
                     await targetMember.roles.add(rolesToAdd).catch(() => null);
                     if (isAcademy) await targetMember.roles.remove("1458410670071615580").catch(() => null);
 
@@ -5191,8 +5298,12 @@ const PORTFOLIO_ADMIN_TOPIC_PREFIX = "darkness-portfolio-admin:";
 const PORTFOLIO_CATEGORY_NAME = "Портфели";
 const PORTFOLIO_ARCHIVE_CATEGORY_NAME = "Архив портфелей";
 const DISCORD_CATEGORY_CHANNEL_LIMIT = 50;
-const PORTFOLIO_REWARD_RP_POINTS = 3
+const PORTFOLIO_REWARD_RP_POINTS = 3;
 const PORTFOLIO_REWARD_CAPT_POINTS = 5;
+const PORTFOLIO_TIER_A_ROLE_ID = "1541151892309278811";
+const PORTFOLIO_TIER_B_ROLE_ID = "1541151934944125019";
+const PORTFOLIO_TIER_C_ROLE_ID = "1541151978631995453";
+const PORTFOLIO_TIER_ROLE_IDS = [PORTFOLIO_TIER_A_ROLE_ID, PORTFOLIO_TIER_B_ROLE_ID, PORTFOLIO_TIER_C_ROLE_ID];
 
 function personalReportNoticePayload({ userId, title, message, color = 0xE74C3C, mentionHighRank = true }) {
     const container = new ContainerBuilder()
@@ -5692,7 +5803,7 @@ function hasPortfolioAdminAccess(interaction) {
 }
 
 function buildPortfolioAdminThreadContainer(userId, displayName) {
-    const actionRow = new ActionRowBuilder().addComponents(
+    const rewardRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
             .setCustomId(`portfolio_thread_reward_rp_${userId}`)
             .setLabel(`Выдать +${PORTFOLIO_REWARD_RP_POINTS} за РП отчёт`)
@@ -5704,6 +5815,18 @@ function buildPortfolioAdminThreadContainer(userId, displayName) {
             .setEmoji("⚔️")
             .setStyle(ButtonStyle.Secondary)
     );
+    const tierRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`portfolio_thread_tier_up_${userId}`)
+            .setLabel("Повысить тир")
+            .setEmoji("⬆️")
+            .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+            .setCustomId(`portfolio_thread_tier_down_${userId}`)
+            .setLabel("Понизить тир")
+            .setEmoji("⬇️")
+            .setStyle(ButtonStyle.Secondary)
+    );
 
     return new ContainerBuilder()
         .setAccentColor(0x2B2D31)
@@ -5711,10 +5834,12 @@ function buildPortfolioAdminThreadContainer(userId, displayName) {
         .addSeparatorComponents(new SeparatorBuilder())
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(
             `📋 РП отчёт — **+${PORTFOLIO_REWARD_RP_POINTS} балла**\n` +
-            `⚔️ Капт — **+${PORTFOLIO_REWARD_CAPT_POINTS} баллов**`
+            `⚔️ Капт — **+${PORTFOLIO_REWARD_CAPT_POINTS} баллов**\n` +
+            `⬆️ / ⬇️ — изменить тир участника`
         ))
         .addSeparatorComponents(new SeparatorBuilder())
-        .addActionRowComponents(actionRow);
+        .addActionRowComponents(rewardRow)
+        .addActionRowComponents(tierRow);
 }
 
 async function findPortfolioAdminThread(portfolioChannel) {
@@ -5760,16 +5885,19 @@ async function ensurePortfolioAdminThread(member, portfolioChannel) {
     }
 
     const messages = await thread.messages.fetch({ limit: 50 }).catch(() => null);
-    const hasPanel = messages?.some(message =>
+    const panelMessage = messages?.find(message =>
         message.author?.id === client.user.id &&
         componentsContainText(message.components, "Админ-панель")
     );
-    if (!hasPanel) {
-        await thread.send({
-            components: [buildPortfolioAdminThreadContainer(member.id, portfolioBaseChannelName(member))],
-            flags: MessageFlags.IsComponentsV2,
-            allowedMentions: { parse: [] }
-        }).catch(() => null);
+    const panelPayload = {
+        components: [buildPortfolioAdminThreadContainer(member.id, portfolioBaseChannelName(member))],
+        flags: MessageFlags.IsComponentsV2,
+        allowedMentions: { parse: [] }
+    };
+    if (panelMessage) {
+        await panelMessage.edit(panelPayload).catch(() => null);
+    } else {
+        await thread.send(panelPayload).catch(() => null);
     }
     return thread;
 }
