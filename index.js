@@ -5399,6 +5399,13 @@ async function ensurePrivatePortfolioChannel(member) {
     }
     if (!channel) return { channel: null, created: false };
 
+    if (isArchivePortfolioCategory(guild, channel.parentId)) {
+        const activeCategory = await getAvailablePortfolioCategory(guild, "active", 1);
+        if (activeCategory && channel.parentId !== activeCategory.id) {
+            await channel.setParent(activeCategory.id, { lockPermissions: false }).catch(() => null);
+        }
+    }
+
     if (channel.name !== personalReportChannelName(member)) {
         await channel.setName(personalReportChannelName(member)).catch(() => null);
     }
