@@ -4082,7 +4082,7 @@ Main состав — основа нашей семьи. Здесь играю�
 
             await i.reply({ content: `✅ Покупка оформлена: **100,000 игровой валюты**. Списано **${price}** баллов. Остаток: **${fmtPoints(salary.mpPoints[i.user.id])}**.\n💵 Обратитесь к администрации для ручной выдачи.`, flags: MessageFlags.Ephemeral });
 
-            const logChannel = await i.guild.channels.fetch("1518544382985371698").catch(() => null);
+            const logChannel = await i.guild.channels.fetch("1519416871328288798").catch(() => null);
             if (logChannel) {
                 await logChannel.send({ content: `🛒 <@${i.user.id}> купил(а) **«100,000 игровой валюты»** за **${price}** баллов. Требуется ручная выдача администрацией.` }).catch(() => null);
             }
@@ -4094,7 +4094,8 @@ Main состав — основа нашей семьи. Здесь играю�
         // =====================================================
         if (i.isButton() && i.customId === "shop_buy_main") {
             const price = 500;
-            const MAIN_ROLE_ID = "1458485277495656553";
+            // ID именно роли main из панели магазина, а не роли Darkness/4 ранг.
+            const MAIN_ROLE_ID = "1540314966278807622";
             const currentPoints = salary.mpPoints[i.user.id] || 0;
 
             if (currentPoints < price) {
@@ -4113,9 +4114,19 @@ Main состав — основа нашей семьи. Здесь играю�
                 return;
             }
 
-            const roleAdded = await member.roles.add(MAIN_ROLE_ID).then(() => true).catch(() => false);
+            const mainRole = await i.guild.roles.fetch(MAIN_ROLE_ID).catch(() => null);
+            if (!mainRole) {
+                await i.reply({ content: "❌ Роль `main` не найдена на сервере.", flags: MessageFlags.Ephemeral });
+                return;
+            }
+            if (!mainRole.editable) {
+                await i.reply({ content: "❌ Бот не может выдать роль `main`: она выше его высшей роли или является управляемой.", flags: MessageFlags.Ephemeral });
+                return;
+            }
+
+            const roleAdded = await member.roles.add(mainRole).then(() => true).catch(() => false);
             if (!roleAdded) {
-                await i.reply({ content: "❌ Не удалось выдать роль. Проверьте права бота и иерархию ролей.", flags: MessageFlags.Ephemeral });
+                await i.reply({ content: "❌ Не удалось выдать роль `main`. Проверьте права бота и иерархию ролей.", flags: MessageFlags.Ephemeral });
                 return;
             }
 
