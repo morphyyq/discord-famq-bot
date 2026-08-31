@@ -172,8 +172,9 @@ const VOICE_AFK_CHANNEL_ID = "1458512575506550966"; // АФК войс — ба�
 const VOICE_TICK_MS = 60 * 1000;          // как часто "тикаем" начисление (раз в минуту)
 
 // Каналы модерации покупок
-const WARN_PURCHASE_CHANNEL = "1519416871328288798";
-const MAIN_PURCHASE_REVIEW_CHANNEL = "1519416871328288798";
+const SHOP_REVIEW_CHANNEL = "1519416871328288798";
+const WARN_PURCHASE_CHANNEL = SHOP_REVIEW_CHANNEL;
+const MAIN_PURCHASE_REVIEW_CHANNEL = SHOP_REVIEW_CHANNEL;
 
 // userId -> { channelId, joinedAt } — текущая активная "учитываемая" сессия в войсе
 const voiceSessions = new Map();
@@ -240,6 +241,8 @@ const reportReviewMeta = new Map();
 const rpMenuInteractions = new Map();
 const modalLocks = new Set();
 const mainPurchaseRequests = new Map();
+const warnPurchaseRequests = new Map();
+const cashPurchaseRequests = new Map();
 
 // channelId -> userId — кто сейчас взял заявку на рассмотрение.
 // Пока запись есть, другой рекрут не может нажать "Взять на рассмотрение".
@@ -3993,7 +3996,156 @@ Main состав — основа нашей семьи. Здесь играю�
         }
 
         // =====================================================
-        // МАГАЗИН — покупка "Снять выговор" (50 баллов)
+        // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ МАГАЗИНА
+        // =====================================================
+        function shopPurchaseButtons(type, requestId) {
+            const prefix = type === "warn" ? "shop_warn" : type === "cash" ? "shop_cash" : "shop_main";
+            return new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`${prefix}_confirm_${requestId}`)
+                    .setLabel(type === "main" ? "Выдать роль" : "Одобрить")
+                    .setStyle(ButtonStyle.Success)
+                    .setEmoji("✅"),
+                new ButtonBuilder()
+                    .setCustomId(`${prefix}_reject_${requestId}`)
+                    .setLabel("Отклонить")
+                    .setStyle(ButtonStyle.Danger)
+                    .setEmoji("❌")
+            );
+        }
+
+        function shopPurchasePayload({ title, color, lines, buttons = null }) {
+            const container = new ContainerBuilder()
+                .setAccentColor(color)
+                .addTextDisplayComponents(new TextDisplayBuilder().setContent(`## ${title}`))
+                .addSeparatorComponents(new SeparatorBuilder())
+                .addTextDisplayComponents(new TextDisplayBuilder().setContent(lines.join("\n")));
+
+            if (buttons) {
+                container
+                    .addSeparatorComponents(new SeparatorBuilder())
+                    .addActionRowComponents(buttons);
+            }
+
+            return {
+                components: [container],
+                flags: MessageFlags.IsComponentsV2,
+                allowedMentions: { parse: [] }
+            };
+        }
+
+        async function sendShopPurchaseStatusToPortfolio(guild, userId, { product, approved, reviewerId, details }) {
+            let portfolioChannel = await findPersonalReportChannel(guild, userId, false);
+            if (!portfolioChannel) {
+                portfolioChannel = await findPersonalReportChannel(guild, userId, true);
+            }
+            if (!portfolioChannel) return;
+
+            const status = approved ? "одобрена" : "отменена";
+            await portfolioChannel.send(shopPurchasePayload({
+                title: approved ? "✅ Покупка одобрена" : "❌ Покупка отменена",
+                color: approved ? 0x2ECC71 : 0xE74C3C,
+                lines: [
+                    `<@${userId}>, вашу покупку **«${product}»** ${status}.`,
+                    `**Рассмотрел:** <@${reviewerId}>`,
+                    `**${details}**`
+                ]
+            })).catch(error => console.error("[SHOP PORTFOLIO NOTIFY ERROR]", error));
+        }
+
+        // =====================================================
+        // МАГАЗИН — модерация заявок и уведомления в портфель
+        // =====================================================
+        if (i.isButton() && (
+            i.customId.startsWith("shop_warn_confirm_") ||
+            i.customId.startsWith("shop_warn_reject_")
+        )) {
+            const isConfirm = i.customId.startsWith("shop_warn_confirm_");
+            const requestId = i.customId.replace(
+                isConfirm ? "shop_warn_confirm_" : "shop_warn_reject_",
+                ""
+            );
+            const request = warnPurchaseRequests.get(requestId);
+
+            const canReview = Boolean(
+                i.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
+                SERVERS[i.guild.id]?.ALLOWED_ROLES?.some(roleId => i.member?.roles?.cache?.has(roleId))
+            );
+            if (!canReview) {
+                await i.reply({ content: "❌ Только администраторы могут рассматривать заявки.", flags: MessageFlags.Ephemeral });
+                return;
+            }
+            if (!request) {
+                await i.reply({ content: "❌ Эта заявка уже рассмотрена или устарела.", flags: MessageFlags.Ephemeral });
+                return;
+            }
+            if (request.processing) {
+                await i.reply({ content: "⏳ Заявка уже обрабатывается другим администратором.", flags: MessageFlags.Ephemeral });
+                return;
+            }
+
+            request.processing = true;
+            if (!isConfirm) {
+                warnPurchaseRequests.delete(requestId);
+                await i.update(shopPurchasePayload({
+                    title: "❌ Покупка «Снять выговор» отменена",
+                    color: 0xE74C3C,
+                    lines: [
+                        `**Участник:** <@${request.userId}>`,
+                        "**Статус:** покупка отменена администрацией.",
+                        `**Отменил:** <@${i.user.id}>`,
+                        "**Баллы:** не списывались"
+                    ]
+                }));
+                await sendShopPurchaseStatusToPortfolio(i.guild, request.userId, {
+                    product: "Снять выговор",
+                    approved: false,
+                    reviewerId: i.user.id,
+                    details: "Баллы не списывались."
+                });
+                return;
+            }
+
+            const currentPoints = salary.mpPoints[request.userId] || 0;
+            if (currentPoints < request.price) {
+                warnPurchaseRequests.delete(requestId);
+                await i.update(shopPurchasePayload({
+                    title: "⚠️ Покупка «Снять выговор» не выполнена",
+                    color: 0xF39C12,
+                    lines: [
+                        `**Участник:** <@${request.userId}>`,
+                        `**Причина:** недостаточно баллов — нужно **${request.price}**, есть **${fmtPoints(currentPoints)}**.`,
+                        `**Проверил:** <@${i.user.id}>`
+                    ]
+                }));
+                return;
+            }
+
+            salary.mpPoints[request.userId] = currentPoints - request.price;
+            await saveDB(salary);
+            warnPurchaseRequests.delete(requestId);
+
+            await i.update(shopPurchasePayload({
+                title: "✅ Покупка «Снять выговор» одобрена",
+                color: 0x2ECC71,
+                lines: [
+                    `**Участник:** <@${request.userId}>`,
+                    `**Одобрил:** <@${i.user.id}>`,
+                    `**Списано:** ${request.price} баллов`,
+                    `**Остаток:** ${fmtPoints(salary.mpPoints[request.userId])} баллов`
+                ]
+            }));
+            await sendShopPurchaseStatusToPortfolio(i.guild, request.userId, {
+                product: "Снять выговор",
+                approved: true,
+                reviewerId: i.user.id,
+                details: `Списано ${request.price} баллов. Остаток: ${fmtPoints(salary.mpPoints[request.userId])} баллов.`
+            });
+            return;
+        }
+
+        // =====================================================
+        // МАГАЗИН — заявка на покупку "Снять выговор" (50 баллов)
         // =====================================================
         if (i.isButton() && i.customId === "shop_buy_warn") {
             const price = 50;
@@ -4004,71 +4156,149 @@ Main состав — основа нашей семьи. Здесь играю�
                 return;
             }
 
-            salary.mpPoints[i.user.id] = currentPoints - price;
+            const alreadyPending = [...warnPurchaseRequests.values()].some(request =>
+                request.guildId === i.guild.id && request.userId === i.user.id
+            );
+            if (alreadyPending) {
+                await i.reply({ content: "⏳ Ваша заявка на снятие выговора уже находится на рассмотрении.", flags: MessageFlags.Ephemeral });
+                return;
+            }
+
+            const reviewChannel = await i.guild.channels.fetch(WARN_PURCHASE_CHANNEL).catch(() => null);
+            if (!reviewChannel || !reviewChannel.isTextBased?.()) {
+                await i.reply({ content: "❌ Канал для заявок администрации не найден.", flags: MessageFlags.Ephemeral });
+                return;
+            }
+
+            const requestId = `${i.user.id}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+            warnPurchaseRequests.set(requestId, {
+                guildId: i.guild.id,
+                userId: i.user.id,
+                price,
+                processing: false,
+                createdAt: Date.now()
+            });
+
+            const requestMessage = await reviewChannel.send(shopPurchasePayload({
+                title: "⚠️ Заявка на покупку «Снять выговор»",
+                color: 0xF39C12,
+                lines: [
+                    `**Участник:** <@${i.user.id}>`,
+                    "**Товар:** Снять выговор",
+                    `**Стоимость:** ${price} баллов`,
+                    `**Баланс сейчас:** ${fmtPoints(currentPoints)} баллов`,
+                    "Баллы будут списаны только после одобрения администрации."
+                ],
+                buttons: shopPurchaseButtons("warn", requestId)
+            })).catch(() => null);
+
+            if (!requestMessage) {
+                warnPurchaseRequests.delete(requestId);
+                await i.reply({ content: "❌ Не удалось отправить заявку администрации.", flags: MessageFlags.Ephemeral });
+                return;
+            }
+
+            await i.reply({
+                content: "✅ Заявка отправлена администрации. Баллы будут списаны только после одобрения.",
+                flags: MessageFlags.Ephemeral
+            });
+            return;
+        }
+
+        // =====================================================
+        // МАГАЗИН — модерация покупки 100 000 игровой валюты
+        // =====================================================
+        if (i.isButton() && (
+            i.customId.startsWith("shop_cash_confirm_") ||
+            i.customId.startsWith("shop_cash_reject_")
+        )) {
+            const isConfirm = i.customId.startsWith("shop_cash_confirm_");
+            const requestId = i.customId.replace(
+                isConfirm ? "shop_cash_confirm_" : "shop_cash_reject_",
+                ""
+            );
+            const request = cashPurchaseRequests.get(requestId);
+
+            const canReview = Boolean(
+                i.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
+                SERVERS[i.guild.id]?.ALLOWED_ROLES?.some(roleId => i.member?.roles?.cache?.has(roleId))
+            );
+            if (!canReview) {
+                await i.reply({ content: "❌ Только администраторы могут рассматривать заявки.", flags: MessageFlags.Ephemeral });
+                return;
+            }
+            if (!request) {
+                await i.reply({ content: "❌ Эта заявка уже рассмотрена или устарела.", flags: MessageFlags.Ephemeral });
+                return;
+            }
+            if (request.processing) {
+                await i.reply({ content: "⏳ Заявка уже обрабатывается другим администратором.", flags: MessageFlags.Ephemeral });
+                return;
+            }
+
+            request.processing = true;
+            if (!isConfirm) {
+                cashPurchaseRequests.delete(requestId);
+                await i.update(shopPurchasePayload({
+                    title: "❌ Покупка 100 000 игровой валюты отменена",
+                    color: 0xE74C3C,
+                    lines: [
+                        `**Участник:** <@${request.userId}>`,
+                        "**Статус:** покупка отменена администрацией.",
+                        `**Отменил:** <@${i.user.id}>`,
+                        "**Баллы:** не списывались"
+                    ]
+                }));
+                await sendShopPurchaseStatusToPortfolio(i.guild, request.userId, {
+                    product: "100 000 игровой валюты",
+                    approved: false,
+                    reviewerId: i.user.id,
+                    details: "Баллы не списывались."
+                });
+                return;
+            }
+
+            const currentPoints = salary.mpPoints[request.userId] || 0;
+            if (currentPoints < request.price) {
+                cashPurchaseRequests.delete(requestId);
+                await i.update(shopPurchasePayload({
+                    title: "⚠️ Покупка игровой валюты не выполнена",
+                    color: 0xF39C12,
+                    lines: [
+                        `**Участник:** <@${request.userId}>`,
+                        `**Причина:** недостаточно баллов — нужно **${request.price}**, есть **${fmtPoints(currentPoints)}**.`,
+                        `**Проверил:** <@${i.user.id}>`
+                    ]
+                }));
+                return;
+            }
+
+            salary.mpPoints[request.userId] = currentPoints - request.price;
             await saveDB(salary);
+            cashPurchaseRequests.delete(requestId);
 
-            await i.reply({ content: `✅ Покупка оформлена: **Снять выговор**. Списано **${price}** баллов. Остаток: **${fmtPoints(salary.mpPoints[i.user.id])}**.\n⚠️ Заявка отправлена администрации на подтверждение.`, flags: MessageFlags.Ephemeral });
-
-            const reviewChannel = await client.channels.fetch(WARN_PURCHASE_CHANNEL).catch(() => null);
-            if (reviewChannel) {
-                const warnEmbed = new EmbedBuilder()
-                    .setTitle("⚠️ Покупка: Снять выговор")
-                    .setThumbnail(i.user.displayAvatarURL({ dynamic: true }))
-                    .setDescription(
-                        `👤 **Игрок:** <@${i.user.id}>\n` +
-                        `🛒 **Товар:** Снять выговор\n` +
-                        `🏆 **Списано баллов:** ${price}\n` +
-                        `📦 **Остаток баллов:** ${fmtPoints(salary.mpPoints[i.user.id])}`
-                    )
-                    .setColor("Orange")
-                    .setTimestamp();
-
-                const confirmRow = new ActionRowBuilder().addComponents(
-                    new ButtonBuilder()
-                        .setCustomId(`warn_purchase_confirm_${i.user.id}`)
-                        .setLabel("Подтвердить")
-                        .setStyle(ButtonStyle.Success)
-                        .setEmoji("✅")
-                );
-
-                await reviewChannel.send({ embeds: [warnEmbed], components: [confirmRow] }).catch(() => null);
-            }
+            await i.update(shopPurchasePayload({
+                title: "✅ Покупка 100 000 игровой валюты одобрена",
+                color: 0x2ECC71,
+                lines: [
+                    `**Участник:** <@${request.userId}>`,
+                    `**Одобрил:** <@${i.user.id}>`,
+                    `**Списано:** ${request.price} баллов`,
+                    `**Остаток:** ${fmtPoints(salary.mpPoints[request.userId])} баллов`,
+                    "Игровую валюту необходимо выдать вручную."
+                ]
+            }));
+            await sendShopPurchaseStatusToPortfolio(i.guild, request.userId, {
+                product: "100 000 игровой валюты",
+                approved: true,
+                reviewerId: i.user.id,
+                details: `Списано ${request.price} баллов. Игровую валюту необходимо выдать вручную.`
+            });
             return;
         }
 
         // =====================================================
-        // МАГАЗИН — подтверждение администратором снятия выговора
-        // =====================================================
-        if (i.isButton() && i.customId.startsWith("warn_purchase_confirm_")) {
-            const userId = i.customId.replace("warn_purchase_confirm_", "");
-
-            const confirmedEmbed = EmbedBuilder.from(i.message.embeds[0])
-                .setColor("Green")
-                .setTitle("✅ Снят выговор | Подтверждено")
-                .addFields({ name: "Подтвердил", value: `<@${i.user.id}>`, inline: true });
-
-            await i.update({ embeds: [confirmedEmbed], components: [] });
-
-            // Записываем в портфель игрока, если он у него есть
-            const portfolioChannel = await findPersonalReportChannel(i.guild, userId, true);
-            if (portfolioChannel) {
-                const nowStr = new Date().toLocaleDateString("ru-RU") + " " + new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
-                const portfolioEmbed = new EmbedBuilder()
-                    .setTitle("⚠️ Снятие выговора • ✅ Подтверждено")
-                    .setDescription(
-                        `**Товар:** Снять выговор\n` +
-                        `**Подтвердил:** <@${i.user.id}>\n` +
-                        `**Дата:** ${nowStr}`
-                    )
-                    .setColor("Green")
-                    .setTimestamp();
-                await portfolioChannel.send({ embeds: [portfolioEmbed] }).catch(() => null);
-            }
-            return;
-        }
-
-        // =====================================================
-        // МАГАЗИН — покупка "100,000 игровой валюты" (1000 баллов)
+        // МАГАЗИН — заявка на покупку 100 000 игровой валюты
         // =====================================================
         if (i.isButton() && i.customId === "shop_buy_cash") {
             const price = 100;
@@ -4079,20 +4309,57 @@ Main состав — основа нашей семьи. Здесь играю�
                 return;
             }
 
-            salary.mpPoints[i.user.id] = currentPoints - price;
-            await saveDB(salary);
-
-            await i.reply({ content: `✅ Покупка оформлена: **100,000 игровой валюты**. Списано **${price}** баллов. Остаток: **${fmtPoints(salary.mpPoints[i.user.id])}**.\n💵 Обратитесь к администрации для ручной выдачи.`, flags: MessageFlags.Ephemeral });
-
-            const logChannel = await i.guild.channels.fetch("1519416871328288798").catch(() => null);
-            if (logChannel) {
-                await logChannel.send({ content: `🛒 <@${i.user.id}> купил(а) **«100,000 игровой валюты»** за **${price}** баллов. Требуется ручная выдача администрацией.` }).catch(() => null);
+            const alreadyPending = [...cashPurchaseRequests.values()].some(request =>
+                request.guildId === i.guild.id && request.userId === i.user.id
+            );
+            if (alreadyPending) {
+                await i.reply({ content: "⏳ Ваша заявка на покупку игровой валюты уже находится на рассмотрении.", flags: MessageFlags.Ephemeral });
+                return;
             }
+
+            const reviewChannel = await i.guild.channels.fetch(SHOP_REVIEW_CHANNEL).catch(() => null);
+            if (!reviewChannel || !reviewChannel.isTextBased?.()) {
+                await i.reply({ content: "❌ Канал для заявок администрации не найден.", flags: MessageFlags.Ephemeral });
+                return;
+            }
+
+            const requestId = `${i.user.id}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+            cashPurchaseRequests.set(requestId, {
+                guildId: i.guild.id,
+                userId: i.user.id,
+                price,
+                processing: false,
+                createdAt: Date.now()
+            });
+
+            const requestMessage = await reviewChannel.send(shopPurchasePayload({
+                title: "💵 Заявка на покупку 100 000 игровой валюты",
+                color: 0x3498DB,
+                lines: [
+                    `**Участник:** <@${i.user.id}>`,
+                    "**Товар:** 100 000 игровой валюты",
+                    `**Стоимость:** ${price} баллов`,
+                    `**Баланс сейчас:** ${fmtPoints(currentPoints)} баллов`,
+                    "Баллы будут списаны только после одобрения администрации."
+                ],
+                buttons: shopPurchaseButtons("cash", requestId)
+            })).catch(() => null);
+
+            if (!requestMessage) {
+                cashPurchaseRequests.delete(requestId);
+                await i.reply({ content: "❌ Не удалось отправить заявку администрации.", flags: MessageFlags.Ephemeral });
+                return;
+            }
+
+            await i.reply({
+                content: "✅ Заявка отправлена администрации. Баллы будут списаны только после одобрения.",
+                flags: MessageFlags.Ephemeral
+            });
             return;
         }
 
         // =====================================================
-        // МАГАЗИН — подтверждение/отклонение покупки роли "main"
+        // МАГАЗИН — модерация покупки роли "main"
         // =====================================================
         if (i.isButton() && (
             i.customId.startsWith("shop_main_confirm_") ||
@@ -4103,46 +4370,44 @@ Main состав — основа нашей семьи. Здесь играю�
                 isConfirm ? "shop_main_confirm_" : "shop_main_reject_",
                 ""
             );
+            const request = mainPurchaseRequests.get(requestId);
 
-            const canReviewMainPurchase = Boolean(
+            const canReview = Boolean(
                 i.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
                 SERVERS[i.guild.id]?.ALLOWED_ROLES?.some(roleId => i.member?.roles?.cache?.has(roleId))
             );
-            if (!canReviewMainPurchase) {
-                await i.reply({
-                    content: "❌ Только администраторы могут рассматривать заявки.",
-                    flags: MessageFlags.Ephemeral
-                });
+            if (!canReview) {
+                await i.reply({ content: "❌ Только администраторы могут рассматривать заявки.", flags: MessageFlags.Ephemeral });
                 return;
             }
-
-            const request = mainPurchaseRequests.get(requestId);
             if (!request) {
-                await i.reply({
-                    content: "❌ Эта заявка уже рассмотрена или устарела.",
-                    flags: MessageFlags.Ephemeral
-                });
+                await i.reply({ content: "❌ Эта заявка уже рассмотрена или устарела.", flags: MessageFlags.Ephemeral });
                 return;
             }
-
             if (request.processing) {
-                await i.reply({
-                    content: "⏳ Заявка уже обрабатывается другим администратором.",
-                    flags: MessageFlags.Ephemeral
-                });
+                await i.reply({ content: "⏳ Заявка уже обрабатывается другим администратором.", flags: MessageFlags.Ephemeral });
                 return;
             }
 
             request.processing = true;
-            const requestEmbed = EmbedBuilder.from(i.message.embeds?.[0] || new EmbedBuilder());
-
             if (!isConfirm) {
                 mainPurchaseRequests.delete(requestId);
-                requestEmbed
-                    .setColor("Red")
-                    .setTitle("❌ Заявка на роль main отклонена")
-                    .addFields({ name: "Отклонил", value: `<@${i.user.id}>`, inline: true });
-                await i.update({ embeds: [requestEmbed], components: [] });
+                await i.update(shopPurchasePayload({
+                    title: "❌ Покупка роли main отменена",
+                    color: 0xE74C3C,
+                    lines: [
+                        `**Участник:** <@${request.userId}>`,
+                        "**Статус:** покупка отменена администрацией.",
+                        `**Отменил:** <@${i.user.id}>`,
+                        "**Баллы:** не списывались"
+                    ]
+                }));
+                await sendShopPurchaseStatusToPortfolio(i.guild, request.userId, {
+                    product: "роль main",
+                    approved: false,
+                    reviewerId: i.user.id,
+                    details: "Баллы не списывались."
+                });
                 return;
             }
 
@@ -4151,58 +4416,69 @@ Main состав — основа нашей семьи. Здесь играю�
             const currentPoints = salary.mpPoints[request.userId] || 0;
 
             if (!targetMember || !mainRole) {
-                request.processing = false;
-                requestEmbed
-                    .setColor("Red")
-                    .setTitle("❌ Заявка не выполнена")
-                    .addFields({ name: "Причина", value: "Участник или роль main не найдены.", inline: false });
                 mainPurchaseRequests.delete(requestId);
-                await i.update({ embeds: [requestEmbed], components: [] });
+                await i.update(shopPurchasePayload({
+                    title: "⚠️ Покупка роли main не выполнена",
+                    color: 0xF39C12,
+                    lines: [
+                        `**Участник:** <@${request.userId}>`,
+                        "**Причина:** участник или роль main не найдены.",
+                        `**Проверил:** <@${i.user.id}>`
+                    ]
+                }));
                 return;
             }
-
             if (targetMember.roles.cache.has(request.roleId)) {
-                request.processing = false;
-                requestEmbed
-                    .setColor("Orange")
-                    .setTitle("⚠️ Заявка закрыта")
-                    .addFields({ name: "Причина", value: "У участника уже есть роль main.", inline: false });
                 mainPurchaseRequests.delete(requestId);
-                await i.update({ embeds: [requestEmbed], components: [] });
+                await i.update(shopPurchasePayload({
+                    title: "⚠️ Покупка роли main закрыта",
+                    color: 0xF39C12,
+                    lines: [
+                        `**Участник:** <@${request.userId}>`,
+                        "**Причина:** у участника уже есть роль main.",
+                        "**Баллы:** не списывались"
+                    ]
+                }));
                 return;
             }
-
             if (currentPoints < request.price) {
-                request.processing = false;
-                requestEmbed
-                    .setColor("Orange")
-                    .setTitle("⚠️ Заявка не выполнена")
-                    .addFields({ name: "Причина", value: `У участника недостаточно баллов. Нужно **${request.price}**, есть **${fmtPoints(currentPoints)}**.`, inline: false });
                 mainPurchaseRequests.delete(requestId);
-                await i.update({ embeds: [requestEmbed], components: [] });
+                await i.update(shopPurchasePayload({
+                    title: "⚠️ Покупка роли main не выполнена",
+                    color: 0xF39C12,
+                    lines: [
+                        `**Участник:** <@${request.userId}>`,
+                        `**Причина:** недостаточно баллов — нужно **${request.price}**, есть **${fmtPoints(currentPoints)}**.`
+                    ]
+                }));
                 return;
             }
-
             if (!mainRole.editable) {
-                request.processing = false;
-                requestEmbed
-                    .setColor("Red")
-                    .setTitle("❌ Роль main не выдана")
-                    .addFields({ name: "Причина", value: "Роль находится выше высшей роли бота или является управляемой.", inline: false });
                 mainPurchaseRequests.delete(requestId);
-                await i.update({ embeds: [requestEmbed], components: [] });
+                await i.update(shopPurchasePayload({
+                    title: "❌ Роль main не выдана",
+                    color: 0xE74C3C,
+                    lines: [
+                        `**Участник:** <@${request.userId}>`,
+                        "**Причина:** роль выше высшей роли бота или является управляемой.",
+                        "**Баллы:** не списывались"
+                    ]
+                }));
                 return;
             }
 
             const roleAdded = await targetMember.roles.add(mainRole).then(() => true).catch(() => false);
             if (!roleAdded) {
-                request.processing = false;
-                requestEmbed
-                    .setColor("Red")
-                    .setTitle("❌ Роль main не выдана")
-                    .addFields({ name: "Причина", value: "Discord отклонил выдачу роли.", inline: false });
                 mainPurchaseRequests.delete(requestId);
-                await i.update({ embeds: [requestEmbed], components: [] });
+                await i.update(shopPurchasePayload({
+                    title: "❌ Роль main не выдана",
+                    color: 0xE74C3C,
+                    lines: [
+                        `**Участник:** <@${request.userId}>`,
+                        "**Причина:** Discord отклонил выдачу роли.",
+                        "**Баллы:** не списывались"
+                    ]
+                }));
                 return;
             }
 
@@ -4210,20 +4486,27 @@ Main состав — основа нашей семьи. Здесь играю�
             await saveDB(salary);
             mainPurchaseRequests.delete(requestId);
 
-            requestEmbed
-                .setColor("Green")
-                .setTitle("✅ Роль main выдана")
-                .addFields(
-                    { name: "Выдал", value: `<@${i.user.id}>`, inline: true },
-                    { name: "Списано", value: `${request.price} баллов`, inline: true },
-                    { name: "Остаток", value: `${fmtPoints(salary.mpPoints[request.userId])} баллов`, inline: true }
-                );
-            await i.update({ embeds: [requestEmbed], components: [] });
+            await i.update(shopPurchasePayload({
+                title: "✅ Покупка роли main одобрена",
+                color: 0x2ECC71,
+                lines: [
+                    `**Участник:** <@${request.userId}>`,
+                    `**Выдал:** <@${i.user.id}>`,
+                    `**Списано:** ${request.price} баллов`,
+                    `**Остаток:** ${fmtPoints(salary.mpPoints[request.userId])} баллов`
+                ]
+            }));
+            await sendShopPurchaseStatusToPortfolio(i.guild, request.userId, {
+                product: "роль main",
+                approved: true,
+                reviewerId: i.user.id,
+                details: `Списано ${request.price} баллов. Роль выдана.`
+            });
             return;
         }
 
         // =====================================================
-        // МАГАЗИН — заявка на покупку повышения до роли "main" (500 баллов)
+        // МАГАЗИН — заявка на покупку роли "main" (500 баллов)
         // =====================================================
         if (i.isButton() && i.customId === "shop_buy_main") {
             const price = 500;
@@ -4240,7 +4523,6 @@ Main состав — основа нашей семьи. Здесь играю�
                 await i.reply({ content: "❌ Не удалось найти вас на сервере.", flags: MessageFlags.Ephemeral });
                 return;
             }
-
             if (member.roles.cache.has(MAIN_ROLE_ID)) {
                 await i.reply({ content: "❌ У вас уже есть роль `main`.", flags: MessageFlags.Ephemeral });
                 return;
@@ -4280,34 +4562,18 @@ Main состав — основа нашей семьи. Здесь играю�
                 createdAt: Date.now()
             });
 
-            const requestEmbed = new EmbedBuilder()
-                .setTitle("📈 Заявка на покупку роли main")
-                .setDescription(`<@${i.user.id}> хочет приобрести роль <@&${MAIN_ROLE_ID}> за баллы.`)
-                .addFields(
-                    { name: "Участник", value: `<@${i.user.id}>`, inline: true },
-                    { name: "Стоимость", value: `${price} баллов`, inline: true },
-                    { name: "Баланс сейчас", value: `${fmtPoints(currentPoints)} баллов`, inline: true }
-                )
-                .setColor("Orange")
-                .setTimestamp();
-
-            const requestRow = new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setCustomId(`shop_main_confirm_${requestId}`)
-                    .setLabel("Выдать роль")
-                    .setStyle(ButtonStyle.Success)
-                    .setEmoji("✅"),
-                new ButtonBuilder()
-                    .setCustomId(`shop_main_reject_${requestId}`)
-                    .setLabel("Отклонить")
-                    .setStyle(ButtonStyle.Danger)
-                    .setEmoji("❌")
-            );
-
-            const requestMessage = await reviewChannel.send({
-                embeds: [requestEmbed],
-                components: [requestRow]
-            }).catch(() => null);
+            const requestMessage = await reviewChannel.send(shopPurchasePayload({
+                title: "📈 Заявка на покупку роли main",
+                color: 0x9B59B6,
+                lines: [
+                    `**Участник:** <@${i.user.id}>`,
+                    `**Товар:** роль <@&${MAIN_ROLE_ID}>`,
+                    `**Стоимость:** ${price} баллов`,
+                    `**Баланс сейчас:** ${fmtPoints(currentPoints)} баллов`,
+                    "Баллы будут списаны только после одобрения администрации."
+                ],
+                buttons: shopPurchaseButtons("main", requestId)
+            })).catch(() => null);
 
             if (!requestMessage) {
                 mainPurchaseRequests.delete(requestId);
@@ -4316,7 +4582,7 @@ Main состав — основа нашей семьи. Здесь играю�
             }
 
             await i.reply({
-                content: "✅ Заявка отправлена администрации на рассмотрение. Баллы будут списаны только после одобрения.",
+                content: "✅ Заявка отправлена администрации. Баллы будут списаны только после одобрения.",
                 flags: MessageFlags.Ephemeral
             });
             return;
