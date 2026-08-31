@@ -171,8 +171,9 @@ const VOICE_POINTS_PER_MIN = 0.15;        // 0.15 балла/мин (10 балл
 const VOICE_AFK_CHANNEL_ID = "1458512575506550966"; // АФК войс — баллы не начисляются
 const VOICE_TICK_MS = 60 * 1000;          // как часто "тикаем" начисление (раз в минуту)
 
-// Канал, куда падает уведомление о покупке "Снять выговор"
+// Каналы модерации покупок
 const WARN_PURCHASE_CHANNEL = "1519416871328288798";
+const MAIN_PURCHASE_REVIEW_CHANNEL = "1519416871328288798";
 
 // userId -> { channelId, joinedAt } — текущая активная "учитываемая" сессия в войсе
 const voiceSessions = new Map();
@@ -238,6 +239,7 @@ const reportReviewLinks = new Map();
 const reportReviewMeta = new Map();
 const rpMenuInteractions = new Map();
 const modalLocks = new Set();
+const mainPurchaseRequests = new Map();
 
 // channelId -> userId — кто сейчас взял заявку на рассмотрение.
 // Пока запись есть, другой рекрут не может нажать "Взять на рассмотрение".
@@ -2933,7 +2935,7 @@ Main состав — основа нашей семьи. Здесь играю�
                                     components: [
                                         {
                                             type: 10,
-                                            content: "**main**\nповышение до роли main\nАвтоматически выдаёт роль <@&1540314966278807622>.\nЦена: 500"
+                                            content: "**main**\nповышение до роли main\nПосле одобрения администрации выдаётся роль <@&1540314966278807622>.\nЦена: 500"
                                         }
                                     ],
                                     accessory: {
@@ -4090,11 +4092,141 @@ Main состав — основа нашей семьи. Здесь играю�
         }
 
         // =====================================================
-        // МАГАЗИН — покупка повышения до роли "main" (500 баллов)
+        // МАГАЗИН — подтверждение/отклонение покупки роли "main"
+        // =====================================================
+        if (i.isButton() && (
+            i.customId.startsWith("shop_main_confirm_") ||
+            i.customId.startsWith("shop_main_reject_")
+        )) {
+            const isConfirm = i.customId.startsWith("shop_main_confirm_");
+            const requestId = i.customId.replace(
+                isConfirm ? "shop_main_confirm_" : "shop_main_reject_",
+                ""
+            );
+
+            const canReviewMainPurchase = Boolean(
+                i.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
+                SERVERS[i.guild.id]?.ALLOWED_ROLES?.some(roleId => i.member?.roles?.cache?.has(roleId))
+            );
+            if (!canReviewMainPurchase) {
+                await i.reply({
+                    content: "❌ Только администраторы могут рассматривать заявки.",
+                    flags: MessageFlags.Ephemeral
+                });
+                return;
+            }
+
+            const request = mainPurchaseRequests.get(requestId);
+            if (!request) {
+                await i.reply({
+                    content: "❌ Эта заявка уже рассмотрена или устарела.",
+                    flags: MessageFlags.Ephemeral
+                });
+                return;
+            }
+
+            if (request.processing) {
+                await i.reply({
+                    content: "⏳ Заявка уже обрабатывается другим администратором.",
+                    flags: MessageFlags.Ephemeral
+                });
+                return;
+            }
+
+            request.processing = true;
+            const requestEmbed = EmbedBuilder.from(i.message.embeds?.[0] || new EmbedBuilder());
+
+            if (!isConfirm) {
+                mainPurchaseRequests.delete(requestId);
+                requestEmbed
+                    .setColor("Red")
+                    .setTitle("❌ Заявка на роль main отклонена")
+                    .addFields({ name: "Отклонил", value: `<@${i.user.id}>`, inline: true });
+                await i.update({ embeds: [requestEmbed], components: [] });
+                return;
+            }
+
+            const targetMember = await i.guild.members.fetch(request.userId).catch(() => null);
+            const mainRole = await i.guild.roles.fetch(request.roleId).catch(() => null);
+            const currentPoints = salary.mpPoints[request.userId] || 0;
+
+            if (!targetMember || !mainRole) {
+                request.processing = false;
+                requestEmbed
+                    .setColor("Red")
+                    .setTitle("❌ Заявка не выполнена")
+                    .addFields({ name: "Причина", value: "Участник или роль main не найдены.", inline: false });
+                mainPurchaseRequests.delete(requestId);
+                await i.update({ embeds: [requestEmbed], components: [] });
+                return;
+            }
+
+            if (targetMember.roles.cache.has(request.roleId)) {
+                request.processing = false;
+                requestEmbed
+                    .setColor("Orange")
+                    .setTitle("⚠️ Заявка закрыта")
+                    .addFields({ name: "Причина", value: "У участника уже есть роль main.", inline: false });
+                mainPurchaseRequests.delete(requestId);
+                await i.update({ embeds: [requestEmbed], components: [] });
+                return;
+            }
+
+            if (currentPoints < request.price) {
+                request.processing = false;
+                requestEmbed
+                    .setColor("Orange")
+                    .setTitle("⚠️ Заявка не выполнена")
+                    .addFields({ name: "Причина", value: `У участника недостаточно баллов. Нужно **${request.price}**, есть **${fmtPoints(currentPoints)}**.`, inline: false });
+                mainPurchaseRequests.delete(requestId);
+                await i.update({ embeds: [requestEmbed], components: [] });
+                return;
+            }
+
+            if (!mainRole.editable) {
+                request.processing = false;
+                requestEmbed
+                    .setColor("Red")
+                    .setTitle("❌ Роль main не выдана")
+                    .addFields({ name: "Причина", value: "Роль находится выше высшей роли бота или является управляемой.", inline: false });
+                mainPurchaseRequests.delete(requestId);
+                await i.update({ embeds: [requestEmbed], components: [] });
+                return;
+            }
+
+            const roleAdded = await targetMember.roles.add(mainRole).then(() => true).catch(() => false);
+            if (!roleAdded) {
+                request.processing = false;
+                requestEmbed
+                    .setColor("Red")
+                    .setTitle("❌ Роль main не выдана")
+                    .addFields({ name: "Причина", value: "Discord отклонил выдачу роли.", inline: false });
+                mainPurchaseRequests.delete(requestId);
+                await i.update({ embeds: [requestEmbed], components: [] });
+                return;
+            }
+
+            salary.mpPoints[request.userId] = currentPoints - request.price;
+            await saveDB(salary);
+            mainPurchaseRequests.delete(requestId);
+
+            requestEmbed
+                .setColor("Green")
+                .setTitle("✅ Роль main выдана")
+                .addFields(
+                    { name: "Выдал", value: `<@${i.user.id}>`, inline: true },
+                    { name: "Списано", value: `${request.price} баллов`, inline: true },
+                    { name: "Остаток", value: `${fmtPoints(salary.mpPoints[request.userId])} баллов`, inline: true }
+                );
+            await i.update({ embeds: [requestEmbed], components: [] });
+            return;
+        }
+
+        // =====================================================
+        // МАГАЗИН — заявка на покупку повышения до роли "main" (500 баллов)
         // =====================================================
         if (i.isButton() && i.customId === "shop_buy_main") {
             const price = 500;
-            // ID именно роли main из панели магазина, а не роли Darkness/4 ранг.
             const MAIN_ROLE_ID = "1540314966278807622";
             const currentPoints = salary.mpPoints[i.user.id] || 0;
 
@@ -4124,21 +4256,69 @@ Main состав — основа нашей семьи. Здесь играю�
                 return;
             }
 
-            const roleAdded = await member.roles.add(mainRole).then(() => true).catch(() => false);
-            if (!roleAdded) {
-                await i.reply({ content: "❌ Не удалось выдать роль `main`. Проверьте права бота и иерархию ролей.", flags: MessageFlags.Ephemeral });
+            const alreadyPending = [...mainPurchaseRequests.values()].some(request =>
+                request.guildId === i.guild.id && request.userId === i.user.id
+            );
+            if (alreadyPending) {
+                await i.reply({ content: "⏳ Ваша заявка на роль `main` уже находится на рассмотрении у администрации.", flags: MessageFlags.Ephemeral });
                 return;
             }
 
-            salary.mpPoints[i.user.id] = currentPoints - price;
-            await saveDB(salary);
-
-            await i.reply({ content: `✅ Покупка оформлена: повышение до роли **main**. Списано **${price}** баллов. Остаток: **${fmtPoints(salary.mpPoints[i.user.id])}**.\n📈 Роль <@&${MAIN_ROLE_ID}> выдана автоматически.`, flags: MessageFlags.Ephemeral });
-
-            const logChannel = await i.guild.channels.fetch("1518544382985371698").catch(() => null);
-            if (logChannel) {
-                await logChannel.send({ content: `🛒 <@${i.user.id}> купил(а) повышение **«main»** за **${price}** баллов. Роль выдана автоматически.` }).catch(() => null);
+            const reviewChannel = await i.guild.channels.fetch(MAIN_PURCHASE_REVIEW_CHANNEL).catch(() => null);
+            if (!reviewChannel || !reviewChannel.isTextBased?.()) {
+                await i.reply({ content: "❌ Канал для заявок администрации не найден.", flags: MessageFlags.Ephemeral });
+                return;
             }
+
+            const requestId = `${i.user.id}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+            mainPurchaseRequests.set(requestId, {
+                guildId: i.guild.id,
+                userId: i.user.id,
+                roleId: MAIN_ROLE_ID,
+                price,
+                processing: false,
+                createdAt: Date.now()
+            });
+
+            const requestEmbed = new EmbedBuilder()
+                .setTitle("📈 Заявка на покупку роли main")
+                .setDescription(`<@${i.user.id}> хочет приобрести роль <@&${MAIN_ROLE_ID}> за баллы.`)
+                .addFields(
+                    { name: "Участник", value: `<@${i.user.id}>`, inline: true },
+                    { name: "Стоимость", value: `${price} баллов`, inline: true },
+                    { name: "Баланс сейчас", value: `${fmtPoints(currentPoints)} баллов`, inline: true }
+                )
+                .setColor("Orange")
+                .setTimestamp();
+
+            const requestRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`shop_main_confirm_${requestId}`)
+                    .setLabel("Выдать роль")
+                    .setStyle(ButtonStyle.Success)
+                    .setEmoji("✅"),
+                new ButtonBuilder()
+                    .setCustomId(`shop_main_reject_${requestId}`)
+                    .setLabel("Отклонить")
+                    .setStyle(ButtonStyle.Danger)
+                    .setEmoji("❌")
+            );
+
+            const requestMessage = await reviewChannel.send({
+                embeds: [requestEmbed],
+                components: [requestRow]
+            }).catch(() => null);
+
+            if (!requestMessage) {
+                mainPurchaseRequests.delete(requestId);
+                await i.reply({ content: "❌ Не удалось отправить заявку администрации.", flags: MessageFlags.Ephemeral });
+                return;
+            }
+
+            await i.reply({
+                content: "✅ Заявка отправлена администрации на рассмотрение. Баллы будут списаны только после одобрения.",
+                flags: MessageFlags.Ephemeral
+            });
             return;
         }
 
