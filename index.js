@@ -981,8 +981,8 @@ function getTemporaryVoiceRoomForMember(member) {
 
 function buildVoiceControlPanel() {
     const buttons = [
-        ["voice_add_slot", "👥➕"],
-        ["voice_remove_slot", "👥➖"],
+        ["voice_add_slot", "➕"],
+        ["voice_remove_slot", "➖"],
         ["voice_lock_user", "🔒"],
         ["voice_speak_user", "🔊"],
         ["voice_kick_user", "❌"],
