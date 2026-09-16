@@ -178,6 +178,7 @@ const TEMP_VOICE_TRIGGER_ID = "1549820919810232371";
 const VOICE_CONTROL_PANEL_CHANNEL_ID = "1549820934175596584";
 const TEMP_VOICE_TOPIC_PREFIX = "darkness-temp-voice:";
 const tempVoiceRooms = new Map(); // ownerId -> temporary voice channel id
+let portfolioRebuildInProgress = false;
 
 // Каналы модерации покупок
 const SHOP_REVIEW_CHANNEL = "1519416871328288798";
@@ -1328,6 +1329,14 @@ client.once(Events.ClientReady, async () => {
         new SlashCommandBuilder().setName("recruit_panel").setDescription("Отправить панель заявки в отдел Recruit").setDefaultMemberPermissions(0),
         new SlashCommandBuilder().setName("rank").setDescription("Посмотреть статистику выполненных отчетов").addUserOption(opt => opt.setName("user").setDescription("Выбрать пользователя")).setDefaultMemberPermissions(0),
         new SlashCommandBuilder().setName("info").setDescription("Получить личное дело и карточку заявки игрока").addUserOption(opt => opt.setName("user").setDescription("Выбрать пользователя").setRequired(true)).setDefaultMemberPermissions(0),
+        new SlashCommandBuilder()
+            .setName("rebuild_portfolios")
+            .setDescription("Полностью пересоздать все портфели и их ветки")
+            .addBooleanOption(opt => opt
+                .setName("confirm")
+                .setDescription("Подтвердить удаление старых портфелей")
+                .setRequired(true))
+            .setDefaultMemberPermissions(0),
 
         // МП СИСТЕМА
         new SlashCommandBuilder().setName("mp_panel").setDescription("Отправить панель отчётов об МПшках").setDefaultMemberPermissions(0),
@@ -3189,6 +3198,38 @@ Main состав — основа нашей семьи. Здесь играю�
 
                 await channel.send({ embeds: [embed], components: [row] });
                 await i.reply({ content: "✅ Панель сборов отправлена!", flags: MessageFlags.Ephemeral });
+                return;
+            }
+
+            // =====================================================
+            // ПЕРЕСОЗДАНИЕ ПОРТФЕЛЕЙ
+            // =====================================================
+            if (i.commandName === "rebuild_portfolios") {
+                const canRebuild = Boolean(
+                    i.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
+                    SERVERS[i.guild.id]?.ALLOWED_ROLES?.some(roleId => i.member?.roles?.cache?.has(roleId))
+                );
+                if (!canRebuild) {
+                    await i.reply({ content: "❌ Только администратор может пересоздавать портфели.", flags: MessageFlags.Ephemeral });
+                    return;
+                }
+
+                if (!i.options.getBoolean("confirm")) {
+                    await i.reply({
+                        content: "⚠️ Для запуска укажите подтверждение: `/rebuild_portfolios confirm:true`. Старые портфели, сообщения и ветки будут удалены.",
+                        flags: MessageFlags.Ephemeral
+                    });
+                    return;
+                }
+
+                await i.deferReply({ flags: MessageFlags.Ephemeral });
+                try {
+                    const result = await rebuildAllPortfolios(i.guild);
+                    await i.editReply(`✅ Пересоздание завершено. Удалено портфелей: **${result.deleted}**, создано: **${result.created}**. В каждом созданы карточка и ветки **CAPT & MCL**, **РП контент**, **Уведомления**.`);
+                } catch (error) {
+                    console.error("[PORTFOLIO REBUILD ERROR]", error);
+                    await i.editReply(`❌ Пересоздание портфелей остановлено: ${error.message || "неизвестная ошибка"}`);
+                }
                 return;
             }
 
@@ -6482,6 +6523,46 @@ async function findPersonalReportChannel(guild, userId, refresh = false) {
         channel.type === ChannelType.GuildText &&
         extractPortfolioUserId(channel.topic) === String(userId)
     ) || null;
+}
+
+async function rebuildAllPortfolios(guild) {
+    if (!guild || guild.id !== "1458190222042075251") {
+        return { deleted: 0, created: 0 };
+    }
+    if (portfolioRebuildInProgress) throw new Error("Пересоздание портфелей уже выполняется.");
+
+    portfolioRebuildInProgress = true;
+    try {
+        await guild.members.fetch().catch(() => null);
+        await guild.channels.fetch().catch(() => null);
+
+        const oldPortfolioChannels = guild.channels.cache.filter(channel =>
+            channel.type === ChannelType.GuildText && extractPortfolioUserId(channel.topic)
+        );
+        let deleted = 0;
+        for (const channel of oldPortfolioChannels.values()) {
+            await channel.delete("Полное пересоздание портфелей").then(() => { deleted += 1; }).catch(error => {
+                console.error(`[PORTFOLIO REBUILD DELETE ERROR] ${channel.id}`, error);
+            });
+        }
+
+        await guild.channels.fetch().catch(() => null);
+        const owners = guild.members.cache.filter(member =>
+            !member.user.bot && member.roles.cache.has(PERSONAL_REPORT_ROLE_ID)
+        );
+        let created = 0;
+        for (const owner of owners.values()) {
+            const channel = await createPrivatePortfolioChannel(owner);
+            if (channel) {
+                created += 1;
+                await ensurePortfolioThreads(owner, channel);
+            }
+        }
+
+        return { deleted, created };
+    } finally {
+        portfolioRebuildInProgress = false;
+    }
 }
 
 async function createPrivatePortfolioChannel(member, topicPrefix = PORTFOLIO_TOPIC_PREFIX) {
