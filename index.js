@@ -1022,8 +1022,8 @@ function buildVoiceControlPanel() {
     };
 }
 
-async function ensureVoiceControlPanel(guild) {
-    const channel = await guild.channels.fetch(VOICE_CONTROL_PANEL_CHANNEL_ID).catch(error => {
+async function ensureVoiceControlPanel() {
+    const channel = await client.channels.fetch(VOICE_CONTROL_PANEL_CHANNEL_ID).catch(error => {
         console.error("[VOICE PANEL FETCH ERROR]", error);
         return null;
     });
@@ -1405,6 +1405,8 @@ client.once(Events.ClientReady, async () => {
     if (mainGuild) {
         await updateOnlineMonitor();
         await updateAFKEmbed(mainGuild);
+        // Создаём панель войс-комнат до долгой синхронизации портфелей.
+        await ensureVoiceControlPanel();
         await ensureAllLogThreads(mainGuild);
         await ensurePersonalReportCategoryAccess(mainGuild);
         await migrateForumPortfoliosToChannels(mainGuild);
@@ -1415,11 +1417,12 @@ client.once(Events.ClientReady, async () => {
         await removePortfolioAdminThreads(mainGuild);
         await ensureAllPortfolioThreads(mainGuild);
         await initTemporaryVoiceRooms(mainGuild);
-        await ensureVoiceControlPanel(mainGuild);
         await initVoiceSessions(mainGuild);
+        // Если ветку удалили вручную, она будет восстановлена автоматически.
+        setInterval(() => ensureAllPortfolioThreads(mainGuild), 300000);
     }
     setInterval(updateOnlineMonitor, 60000);
-    setInterval(() => ensureVoiceControlPanel(mainGuild), 60000);
+    setInterval(() => ensureVoiceControlPanel(), 60000);
     setInterval(tickVoicePoints, VOICE_TICK_MS);
 
     // =====================================================
