@@ -6249,17 +6249,12 @@ function buildPortfolioInfoPayload(member) {
     const container = new ContainerBuilder()
         .setAccentColor(0x2B2D31)
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(
-            `**Checker:** ${stats.checker}\n` +
             `**Владелец:** <@${member.id}>`
         ))
         .addSeparatorComponents(new SeparatorBuilder())
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(
             "📊 **Статистика:**\n" +
-            `> Мероприятий сыграно: ${stats.events}\n` +
             `> Время в АФК: ${stats.afk} (за все заходы)\n` +
-            `> Откатов отправлено: ${stats.otkats}\n` +
-            `> Удачных повышений: ${stats.promotions}\n` +
-            `> Выговоров: ${stats.warnings}/3\n` +
             `> Баланс: ${stats.balance} 🪙`
         ))
         .addSeparatorComponents(new SeparatorBuilder())
@@ -6272,34 +6267,6 @@ function buildPortfolioInfoPayload(member) {
         .addSeparatorComponents(new SeparatorBuilder())
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(
             "В основном канале портфолио можно писать свободно."
-        ))
-        .addSeparatorComponents(new SeparatorBuilder())
-        .addActionRowComponents(new ActionRowBuilder().addComponents(
-            new StringSelectMenuBuilder()
-                .setCustomId(`portfolio_checker_select_${member.id}`)
-                .setPlaceholder("Управление чекером портфеля")
-                .setMinValues(1)
-                .setMaxValues(1)
-                .addOptions(
-                    {
-                        label: "Стать чекером",
-                        value: "become",
-                        description: "Назначить себя чекером этого портфеля",
-                        emoji: { name: "✅" }
-                    },
-                    {
-                        label: "Отказаться",
-                        value: "decline",
-                        description: "Отказаться от роли чекера этого портфеля",
-                        emoji: { name: "🚫" }
-                    },
-                    {
-                        label: "Убрать чекера",
-                        value: "remove",
-                        description: "Убрать назначенного чекера из этого портфеля",
-                        emoji: { name: "🗑️" }
-                    }
-                )
         ));
 
     return {
