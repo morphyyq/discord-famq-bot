@@ -1915,18 +1915,30 @@ function plusTotalSlots(event) {
     return event.participants.size + event.extraParticipants.size;
 }
 
+function getServerEmoji(guild, name, fallback) {
+    const emoji = guild?.emojis?.cache?.find(item => item.name === name);
+    return {
+        text: emoji ? `<:${emoji.name}:${emoji.id}>` : fallback,
+        component: emoji ? { id: emoji.id, name: emoji.name } : { name: fallback }
+    };
+}
+
 function getPlusTier(userId, guild) {
     const member = guild?.members.cache.get(userId);
     if (member?.roles.cache.has(PORTFOLIO_TIER_A_ROLE_ID)) {
-        return { order: 1, emoji: "🥇", label: "1 тир" };
+        const emoji = getServerEmoji(guild, "odin", "🥇");
+        return { order: 1, emoji: emoji.text, componentEmoji: emoji.component, label: "1 тир" };
     }
     if (member?.roles.cache.has(PORTFOLIO_TIER_B_ROLE_ID)) {
-        return { order: 2, emoji: "🥈", label: "2 тир" };
+        const emoji = getServerEmoji(guild, "dva", "🥈");
+        return { order: 2, emoji: emoji.text, componentEmoji: emoji.component, label: "2 тир" };
     }
     if (member?.roles.cache.has(PORTFOLIO_TIER_C_ROLE_ID)) {
-        return { order: 3, emoji: "🥉", label: "3 тир" };
+        const emoji = getServerEmoji(guild, "tri", "🥉");
+        return { order: 3, emoji: emoji.text, componentEmoji: emoji.component, label: "3 тир" };
     }
-    return { order: 4, emoji: "❓", label: "Без тира" };
+    const emoji = getServerEmoji(guild, "vopros", "❓");
+    return { order: 4, emoji: emoji.text, componentEmoji: emoji.component, label: "Без тира" };
 }
 
 function formatPlusParticipants(entries, event) {
@@ -1968,7 +1980,12 @@ function buildPlusContainer(event) {
         .addSeparatorComponents(new SeparatorBuilder())
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(`### 👥 Участники\n${participantsText}`))
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(`### ➕ Дополнительные слоты\n${extraSlotsText}`))
-        .addTextDisplayComponents(new TextDisplayBuilder().setContent("**Тиры:** 🥇 1 тир · 🥈 2 тир · 🥉 3 тир · ❓ без тира"))
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(
+            `**Тиры:** ${getServerEmoji(client.guilds.cache.get(event.guildId), "odin", "🥇").text} 1 тир · ` +
+            `${getServerEmoji(client.guilds.cache.get(event.guildId), "dva", "🥈").text} 2 тир · ` +
+            `${getServerEmoji(client.guilds.cache.get(event.guildId), "tri", "🥉").text} 3 тир · ` +
+            `${getServerEmoji(client.guilds.cache.get(event.guildId), "vopros", "❓").text} без тира`
+        ))
         .addSeparatorComponents(new SeparatorBuilder())
         .addActionRowComponents(new ActionRowBuilder().addComponents(
             new ButtonBuilder()
@@ -6275,15 +6292,14 @@ function buildPortfolioInfoPayload(member) {
                         value: "decline",
                         description: "Отказаться от роли чекера этого портфеля",
                         emoji: { name: "🚫" }
+                    },
+                    {
+                        label: "Убрать чекера",
+                        value: "remove",
+                        description: "Убрать назначенного чекера из этого портфеля",
+                        emoji: { name: "🗑️" }
                     }
                 )
-        ))
-        .addActionRowComponents(new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-                .setCustomId(`portfolio_checker_remove_${member.id}`)
-                .setLabel("Убрать чекера")
-                .setStyle(ButtonStyle.Danger)
-                .setEmoji("🗑️")
         ));
 
     return {
