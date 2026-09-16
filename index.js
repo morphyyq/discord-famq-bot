@@ -21,6 +21,7 @@ const {
     TextInputBuilder,
     TextInputStyle,
     StringSelectMenuBuilder,
+    UserSelectMenuBuilder,
     ChannelSelectMenuBuilder,
     REST,
     Routes,
@@ -173,6 +174,10 @@ const MP_REJECTED_CHANNEL = "1519417766380179658"; // канал отклоне�
 const VOICE_POINTS_PER_MIN = 0.15;        // 0.15 балла/мин (10 баллов = 66.7 мин)
 const VOICE_AFK_CHANNEL_ID = "1458512575506550966"; // АФК войс — баллы не начисляются
 const VOICE_TICK_MS = 60 * 1000;          // как часто "тикаем" начисление (раз в минуту)
+const TEMP_VOICE_TRIGGER_ID = "1549820919810232371";
+const VOICE_CONTROL_PANEL_CHANNEL_ID = "1549820934175596584";
+const TEMP_VOICE_TOPIC_PREFIX = "darkness-temp-voice:";
+const tempVoiceRooms = new Map(); // ownerId -> temporary voice channel id
 
 // Каналы модерации покупок
 const SHOP_REVIEW_CHANNEL = "1519416871328288798";
@@ -962,8 +967,191 @@ function reconcileChannelMembers(channel) {
     channel.members.forEach(m => reconcileVoiceState(m));
 }
 
-client.on(Events.VoiceStateUpdate, (oldState, newState) => {
+function getTemporaryVoiceOwner(channel) {
+    const match = String(channel?.topic || "").match(/^darkness-temp-voice:(\d+)$/);
+    return match?.[1] || null;
+}
+
+function getTemporaryVoiceRoomForMember(member) {
+    const channel = member?.voice?.channel;
+    const ownerId = getTemporaryVoiceOwner(channel);
+    if (!channel || !ownerId) return null;
+    return { channel, ownerId };
+}
+
+function buildVoiceControlPanel() {
+    const buttons = [
+        ["voice_add_slot", "👥➕"],
+        ["voice_remove_slot", "👥➖"],
+        ["voice_lock_user", "🔒"],
+        ["voice_speak_user", "🔊"],
+        ["voice_kick_user", "❌"],
+        ["voice_bitrate", "🎧"],
+        ["voice_slots", "👥"],
+        ["voice_transfer", "👑"],
+        ["voice_rename", "✏️"],
+        ["voice_access_user", "🔓"]
+    ].map(([customId, emoji]) => new ButtonBuilder()
+        .setCustomId(customId)
+        .setEmoji(emoji)
+        .setStyle(ButtonStyle.Secondary));
+
+    const container = new ContainerBuilder()
+        .setAccentColor(0x2B2D31)
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(
+            "## Возможные манипуляции в вашей комнате\n" +
+            "👥➕ = Добавить 1 слот в вашей комнате\n" +
+            "👥➖ = Убрать 1 слот из вашей комнаты\n" +
+            "🔒 = Запретить/выдать пользователю возможность подключаться к вашей комнате\n" +
+            "🔊 = Разрешить/запретить пользователю говорить в вашей комнате\n" +
+            "❌ = Исключить пользователя из вашей комнаты\n" +
+            "🎧 = Изменить битрейт вашей комнаты\n" +
+            "👥 = Установить количество слотов в комнате\n" +
+            "👑 = Передать право владения комнатой\n" +
+            "✏️ = Сменить название вашей комнаты\n" +
+            "🔓 = Выдать/забрать доступ пользователю в вашу комнату\n\n" +
+            "🫡 Создание временных комнат — только для участников семьи!"
+        ))
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addActionRowComponents(new ActionRowBuilder().addComponents(...buttons.slice(0, 5)))
+        .addActionRowComponents(new ActionRowBuilder().addComponents(...buttons.slice(5)));
+
+    return {
+        components: [container],
+        flags: MessageFlags.IsComponentsV2
+    };
+}
+
+async function ensureVoiceControlPanel(guild) {
+    const channel = await guild.channels.fetch(VOICE_CONTROL_PANEL_CHANNEL_ID).catch(() => null);
+    if (!channel?.isTextBased?.()) return;
+
+    const messages = await channel.messages.fetch({ limit: 50 }).catch(() => null);
+    const panel = messages?.find(message =>
+        message.author?.id === client.user.id &&
+        componentsContainText(message.components, "Возможные манипуляции в вашей комнате")
+    );
+    const payload = buildVoiceControlPanel();
+
+    if (panel) {
+        await panel.edit(payload).catch(() => null);
+    } else {
+        await channel.send(payload).catch(error => console.error("[VOICE PANEL ERROR]", error));
+    }
+}
+
+async function createTemporaryVoiceRoom(member) {
+    const guild = member.guild;
+    const trigger = await guild.channels.fetch(TEMP_VOICE_TRIGGER_ID).catch(() => null);
+    if (!trigger || trigger.type !== ChannelType.GuildVoice) return null;
+
+    const existingId = tempVoiceRooms.get(member.id);
+    const existing = existingId ? guild.channels.cache.get(existingId) : null;
+    if (existing) {
+        await member.voice.setChannel(existing).catch(() => null);
+        return existing;
+    }
+
+    const channel = await guild.channels.create({
+        name: `🔊 ${member.displayName}`.slice(0, 100),
+        type: ChannelType.GuildVoice,
+        parent: trigger.parentId || undefined,
+        topic: `${TEMP_VOICE_TOPIC_PREFIX}${member.id}`,
+        permissionOverwrites: [
+            { id: guild.id, allow: ["ViewChannel", "Connect", "Speak"] },
+            { id: member.id, allow: ["ViewChannel", "Connect", "Speak", "ManageChannels"] },
+            { id: client.user.id, allow: ["ViewChannel", "Connect", "Speak", "ManageChannels", "MoveMembers"] }
+        ]
+    }).catch(error => {
+        console.error("[TEMP VOICE CREATE ERROR]", error);
+        return null;
+    });
+    if (!channel) return null;
+
+    tempVoiceRooms.set(member.id, channel.id);
+    await channel.setPosition(trigger.position + 1).catch(() => null);
+    await member.voice.setChannel(channel).catch(() => null);
+    return channel;
+}
+
+async function transferTemporaryVoiceOwner(channel, newOwnerId) {
+    const oldOwnerId = getTemporaryVoiceOwner(channel);
+    if (!oldOwnerId || !newOwnerId) return false;
+    await channel.setTopic(`${TEMP_VOICE_TOPIC_PREFIX}${newOwnerId}`).catch(() => null);
+    tempVoiceRooms.delete(oldOwnerId);
+    tempVoiceRooms.set(newOwnerId, channel.id);
+    await channel.permissionOverwrites.edit(newOwnerId, {
+        ViewChannel: true,
+        Connect: true,
+        Speak: true,
+        ManageChannels: true
+    }).catch(() => null);
+    return true;
+}
+
+async function cleanupTemporaryVoiceRoom(channel) {
+    const ownerId = getTemporaryVoiceOwner(channel);
+    if (ownerId) tempVoiceRooms.delete(ownerId);
+    await channel.delete("Удаление пустой временной голосовой комнаты").catch(() => null);
+}
+
+async function initTemporaryVoiceRooms(guild) {
+    const channels = await guild.channels.fetch().catch(() => null);
+    if (!channels) return;
+    for (const channel of channels.values()) {
+        const ownerId = getTemporaryVoiceOwner(channel);
+        if (ownerId && channel.type === ChannelType.GuildVoice) {
+            tempVoiceRooms.set(ownerId, channel.id);
+        }
+    }
+}
+
+async function getManagedTemporaryVoice(interaction) {
+    const room = getTemporaryVoiceRoomForMember(interaction.member);
+    if (!room || room.ownerId !== interaction.user.id) {
+        await interaction.reply({ content: "❌ Управлять можно только своей временной комнатой.", flags: MessageFlags.Ephemeral }).catch(() => null);
+        return null;
+    }
+    return room.channel;
+}
+
+function buildVoiceUserSelect(action) {
+    return new ActionRowBuilder().addComponents(
+        new UserSelectMenuBuilder()
+            .setCustomId(`voice_user_action_${action}`)
+            .setPlaceholder("Выберите пользователя")
+            .setMinValues(1)
+            .setMaxValues(1)
+    );
+}
+
+async function handleTemporaryVoiceState(oldState, newState) {
+    const member = newState.member || oldState.member;
+    if (!member || member.user.bot) return;
+
+    if (newState.channelId === TEMP_VOICE_TRIGGER_ID && oldState.channelId !== TEMP_VOICE_TRIGGER_ID) {
+        await createTemporaryVoiceRoom(member);
+    }
+
+    const oldChannel = oldState.channel;
+    if (oldChannel && getTemporaryVoiceOwner(oldChannel) && oldChannel.members.size === 0) {
+        await cleanupTemporaryVoiceRoom(oldChannel);
+    }
+
+    const newChannel = newState.channel;
+    if (newChannel && getTemporaryVoiceOwner(newChannel) && newChannel.members.size > 0) {
+        const ownerId = getTemporaryVoiceOwner(newChannel);
+        const owner = newChannel.guild.members.cache.get(ownerId);
+        if (!owner || owner.voice?.channelId !== newChannel.id) {
+            const nextOwner = newChannel.members.find(m => !m.user.bot);
+            if (nextOwner) await transferTemporaryVoiceOwner(newChannel, nextOwner.id);
+        }
+    }
+}
+
+client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
     try {
+        await handleTemporaryVoiceState(oldState, newState);
         const member = newState.member || oldState.member;
         if (!member) return;
 
@@ -1211,6 +1399,8 @@ client.once(Events.ClientReady, async () => {
         await initPersonalReportChannels(mainGuild);
         await removePortfolioAdminThreads(mainGuild);
         await ensureAllPortfolioThreads(mainGuild);
+        await initTemporaryVoiceRooms(mainGuild);
+        await ensureVoiceControlPanel(mainGuild);
         await initVoiceSessions(mainGuild);
     }
     setInterval(updateOnlineMonitor, 60000);
@@ -5224,6 +5414,157 @@ Main состав — основа нашей семьи. Здесь играю�
             await i.reply({ content: `❌ Заявка успешно отклонена. Причина зафиксирована в канале логирования.` }).catch(() => null);
             setTimeout(() => i.channel.delete().catch(() => null), 2000);
             return;
+        }
+
+        // =====================================================
+        // ВРЕМЕННЫЕ ВОЙСЫ — управление своей комнатой
+        // =====================================================
+        if (i.isButton() && i.customId.startsWith("voice_")) {
+            const room = await getManagedTemporaryVoice(i);
+            if (!room) return;
+
+            if (i.customId === "voice_add_slot") {
+                await room.setUserLimit(Math.min(99, (room.userLimit || 0) + 1));
+                await i.reply({ content: `✅ Лимит комнаты: **${room.userLimit}** слотов.`, flags: MessageFlags.Ephemeral });
+                return;
+            }
+            if (i.customId === "voice_remove_slot") {
+                await room.setUserLimit(Math.max(0, (room.userLimit || 0) - 1));
+                await i.reply({ content: `✅ Лимит комнаты: **${room.userLimit || 0}** слотов.`, flags: MessageFlags.Ephemeral });
+                return;
+            }
+            if (i.customId === "voice_bitrate") {
+                const modal = new ModalBuilder().setCustomId("voice_modal_bitrate").setTitle("Изменить битрейт");
+                modal.addComponents(new ActionRowBuilder().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId("voice_bitrate_value")
+                        .setLabel("Битрейт в Кбит/с")
+                        .setPlaceholder("8–384")
+                        .setRequired(true)
+                        .setStyle(TextInputStyle.Short)
+                ));
+                await i.showModal(modal);
+                return;
+            }
+            if (i.customId === "voice_slots") {
+                const modal = new ModalBuilder().setCustomId("voice_modal_slots").setTitle("Количество слотов");
+                modal.addComponents(new ActionRowBuilder().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId("voice_slots_value")
+                        .setLabel("Количество слотов (0 = без лимита)")
+                        .setPlaceholder("0–99")
+                        .setRequired(true)
+                        .setStyle(TextInputStyle.Short)
+                ));
+                await i.showModal(modal);
+                return;
+            }
+            if (i.customId === "voice_rename") {
+                const modal = new ModalBuilder().setCustomId("voice_modal_rename").setTitle("Переименовать комнату");
+                modal.addComponents(new ActionRowBuilder().addComponents(
+                    new TextInputBuilder()
+                        .setCustomId("voice_rename_value")
+                        .setLabel("Новое название")
+                        .setPlaceholder("Введите название комнаты")
+                        .setRequired(true)
+                        .setMaxLength(100)
+                        .setStyle(TextInputStyle.Short)
+                ));
+                await i.showModal(modal);
+                return;
+            }
+            if (i.customId === "voice_lock_user" || i.customId === "voice_access_user") {
+                await i.reply({ content: "⬇️ Выберите пользователя для изменения доступа к комнате:", components: [buildVoiceUserSelect("connect")], flags: MessageFlags.Ephemeral });
+                return;
+            }
+            if (i.customId === "voice_speak_user") {
+                await i.reply({ content: "⬇️ Выберите пользователя для изменения права говорить:", components: [buildVoiceUserSelect("speak")], flags: MessageFlags.Ephemeral });
+                return;
+            }
+            if (i.customId === "voice_kick_user") {
+                await i.reply({ content: "⬇️ Выберите пользователя, которого исключить:", components: [buildVoiceUserSelect("kick")], flags: MessageFlags.Ephemeral });
+                return;
+            }
+            if (i.customId === "voice_transfer") {
+                await i.reply({ content: "⬇️ Выберите нового владельца комнаты:", components: [buildVoiceUserSelect("transfer")], flags: MessageFlags.Ephemeral });
+                return;
+            }
+        }
+
+        if (i.isUserSelectMenu() && i.customId.startsWith("voice_user_action_")) {
+            const room = await getManagedTemporaryVoice(i);
+            if (!room) return;
+            const action = i.customId.replace("voice_user_action_", "");
+            const targetId = i.values[0];
+            const target = await i.guild.members.fetch(targetId).catch(() => null);
+            if (!target) {
+                await i.update({ content: "❌ Пользователь не найден.", components: [] });
+                return;
+            }
+
+            if (action === "kick") {
+                if (target.voice.channelId === room.id) await target.voice.disconnect("Исключён владельцем временной комнаты").catch(() => null);
+                await i.update({ content: `✅ Пользователь <@${targetId}> исключён из комнаты.`, components: [] });
+                return;
+            }
+            if (action === "transfer") {
+                if (target.user.bot) {
+                    await i.update({ content: "❌ Нельзя передать комнату боту.", components: [] });
+                    return;
+                }
+                await transferTemporaryVoiceOwner(room, targetId);
+                await i.update({ content: `✅ Владельцем комнаты назначен <@${targetId}>.`, components: [] });
+                return;
+            }
+
+            const overwrite = room.permissionOverwrites.cache.get(targetId);
+            if (action === "speak") {
+                const denied = overwrite?.deny?.has(PermissionFlagsBits.Speak);
+                await room.permissionOverwrites.edit(targetId, { Speak: !denied });
+                await i.update({ content: denied ? `✅ <@${targetId}> снова может говорить.` : `🔇 <@${targetId}> больше не может говорить.`, components: [] });
+                return;
+            }
+
+            const denied = overwrite?.deny?.has(PermissionFlagsBits.Connect);
+            await room.permissionOverwrites.edit(targetId, { Connect: !denied });
+            await i.update({ content: denied ? `✅ <@${targetId}> снова может заходить в комнату.` : `🔒 <@${targetId}> больше не может заходить в комнату.`, components: [] });
+            return;
+        }
+
+        if (i.isModalSubmit() && i.customId.startsWith("voice_modal_")) {
+            const room = await getManagedTemporaryVoice(i);
+            if (!room) return;
+
+            if (i.customId === "voice_modal_bitrate") {
+                const bitrate = Number.parseInt(i.fields.getTextInputValue("voice_bitrate_value"), 10);
+                if (!Number.isInteger(bitrate) || bitrate < 8 || bitrate > 384) {
+                    await i.reply({ content: "❌ Укажите битрейт от 8 до 384 Кбит/с.", flags: MessageFlags.Ephemeral });
+                    return;
+                }
+                await room.setBitrate(Math.min(bitrate * 1000, i.guild.maximumBitrate || bitrate * 1000));
+                await i.reply({ content: `✅ Битрейт комнаты установлен: **${bitrate} Кбит/с**.`, flags: MessageFlags.Ephemeral });
+                return;
+            }
+            if (i.customId === "voice_modal_slots") {
+                const slots = Number.parseInt(i.fields.getTextInputValue("voice_slots_value"), 10);
+                if (!Number.isInteger(slots) || slots < 0 || slots > 99) {
+                    await i.reply({ content: "❌ Укажите количество слотов от 0 до 99.", flags: MessageFlags.Ephemeral });
+                    return;
+                }
+                await room.setUserLimit(slots);
+                await i.reply({ content: `✅ Количество слотов установлено: **${slots || "без лимита"}**.`, flags: MessageFlags.Ephemeral });
+                return;
+            }
+            if (i.customId === "voice_modal_rename") {
+                const name = i.fields.getTextInputValue("voice_rename_value").trim();
+                if (!name) {
+                    await i.reply({ content: "❌ Название не может быть пустым.", flags: MessageFlags.Ephemeral });
+                    return;
+                }
+                await room.setName(name.slice(0, 100));
+                await i.reply({ content: `✅ Комната переименована в **${name.slice(0, 100)}**.`, flags: MessageFlags.Ephemeral });
+                return;
+            }
         }
 
         if (!config) return;
