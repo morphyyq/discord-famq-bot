@@ -373,30 +373,41 @@ async function sendApplicationAudit(guild, { status, data, type, targetId, usern
     });
 }
 
-// Строка ряда с кнопками управления заявкой.
-// Все кнопки сделаны нейтральными тёмно-серыми, чтобы не использовать яркие цвета.
+// Выпадающий список действий по заявке вместо четырёх отдельных кнопок.
 function buildAppButtonsRow(targetId, { reviewTaken = false, reviewerTag = null, disableAll = false } = {}) {
     return new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-            .setCustomId(`app_accept_${targetId}`)
-            .setLabel("Принять")
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(disableAll),
-        new ButtonBuilder()
-            .setCustomId(`app_review_${targetId}`)
-            .setLabel(reviewTaken ? `Рассматривает: ${reviewerTag}` : "Взять на рассмотрение")
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(disableAll || reviewTaken),
-        new ButtonBuilder()
-            .setCustomId(`app_call_${targetId}`)
-            .setLabel("Вызвать на обзвон")
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(disableAll),
-        new ButtonBuilder()
-            .setCustomId(`app_reject_${targetId}`)
-            .setLabel("Отклонить")
-            .setStyle(ButtonStyle.Secondary)
+        new StringSelectMenuBuilder()
+            .setCustomId(`app_action_${targetId}`)
+            .setPlaceholder(reviewTaken ? `Заявка на рассмотрении: ${reviewerTag}` : "Выберите действие с заявкой")
+            .setMinValues(1)
+            .setMaxValues(1)
             .setDisabled(disableAll)
+            .addOptions(
+                {
+                    label: "Принять",
+                    value: "accept",
+                    description: "Принять кандидата в состав",
+                    emoji: { name: "✅" }
+                },
+                {
+                    label: reviewTaken ? `Взята: ${reviewerTag}` : "Взять на рассмотрение",
+                    value: "review",
+                    description: "Закрепить заявку за собой",
+                    emoji: { name: "👀" }
+                },
+                {
+                    label: "Вызвать на обзвон",
+                    value: "call",
+                    description: "Выбрать голосовой канал для обзвона",
+                    emoji: { name: "📞" }
+                },
+                {
+                    label: "Отклонить",
+                    value: "reject",
+                    description: "Отклонить заявку с указанием причины",
+                    emoji: { name: "❌" }
+                }
+            )
     );
 }
 
@@ -441,8 +452,9 @@ function findAppTargetId(message) {
     function search(components) {
         if (!components) return null;
         for (const c of components) {
-            if (c.customId && typeof c.customId === "string" && c.customId.startsWith("app_accept_")) {
-                return c.customId.replace("app_accept_", "");
+            if (c.customId && typeof c.customId === "string") {
+                if (c.customId.startsWith("app_action_")) return c.customId.replace("app_action_", "");
+                if (c.customId.startsWith("app_accept_")) return c.customId.replace("app_accept_", "");
             }
             if (c.components) {
                 const found = search(c.components);
@@ -1128,14 +1140,6 @@ client.once(Events.ClientReady, async () => {
             .setDescription("Отправить панель семейного магазина баллов")
             .setDefaultMemberPermissions(0),
         new SlashCommandBuilder()
-            .setName("portfolio_panel")
-            .setDescription("Призвать админ-панель портфеля")
-            .addUserOption(opt => opt
-                .setName("user")
-                .setDescription("Владелец портфеля")
-                .setRequired(false))
-            .setDefaultMemberPermissions(0),
-        new SlashCommandBuilder()
             .setName("clear_roles")
             .setDescription("Снять обычные роли со всех участников-людей")
             .setDefaultMemberPermissions(0),
@@ -1200,7 +1204,8 @@ client.once(Events.ClientReady, async () => {
         await removeLegacyPortfolioAdminChannels(mainGuild);
         await normalizePortfolioChannelNames(mainGuild);
         await initPersonalReportChannels(mainGuild);
-        await syncAllPortfolioAdminThreads(mainGuild);
+        await removePortfolioAdminThreads(mainGuild);
+        await ensureAllPortfolioThreads(mainGuild);
         await initVoiceSessions(mainGuild);
     }
     setInterval(updateOnlineMonitor, 60000);
@@ -3839,50 +3844,9 @@ Main состав — основа нашей семьи. Здесь играю�
             return;
         }
 
-        // =====================================================
-        // КОМАНДА — призвать админ-панель портфеля
-        // =====================================================
+        // Админ-панели портфелей удалены: управление теперь ведётся через разделы портфеля.
         if (i.commandName === "portfolio_panel") {
-            await i.deferReply({ flags: MessageFlags.Ephemeral });
-            if (!hasPortfolioAdminAccess(i)) {
-                await i.editReply({ content: "❌ У вас нет доступа к админ-панели портфелей." });
-                return;
-            }
-
-            const selectedUser = i.options.getUser("user");
-            let userId = selectedUser?.id || null;
-            let portfolioChannel = userId
-                ? await findPersonalReportChannel(i.guild, userId, true)
-                : null;
-
-            if (!portfolioChannel && i.channel?.topic) {
-                userId = extractPortfolioUserId(i.channel.topic);
-                portfolioChannel = userId ? i.channel : null;
-            }
-            if (!portfolioChannel && i.channel?.parentId) {
-                const parentChannel = await i.guild.channels.fetch(i.channel.parentId).catch(() => null);
-                userId = extractPortfolioUserId(parentChannel?.topic);
-                portfolioChannel = userId ? parentChannel : null;
-            }
-
-            if (!portfolioChannel || !userId) {
-                await i.editReply({ content: "❌ Укажите пользователя: `/portfolio_panel user:@пользователь`." });
-                return;
-            }
-
-            const member = await i.guild.members.fetch(userId).catch(() => null);
-            const thread = member ? await ensurePortfolioAdminThread(member, portfolioChannel) : null;
-            if (!thread) {
-                await i.editReply({ content: "❌ Не удалось создать или найти админ-ветку портфеля." });
-                return;
-            }
-
-            await thread.send({
-                components: [buildPortfolioAdminThreadContainer(userId, portfolioBaseChannelName(member))],
-                flags: MessageFlags.IsComponentsV2,
-                allowedMentions: { parse: [] }
-            }).catch(() => null);
-            await i.editReply({ content: `✅ Админ-панель призвана в ветке ${thread}.` });
+            await i.reply({ content: "ℹ️ Админ-панели портфелей удалены. Используйте ветки CAPT & MCL, РП контент и Уведомления.", flags: MessageFlags.Ephemeral });
             return;
         }
 
@@ -5423,8 +5387,10 @@ ${data.q5}
             return;
         }
 
-        if (i.isButton()) {
-            const parts = i.customId.split("_");
+        if (i.isButton() || (i.isStringSelectMenu() && i.customId.startsWith("app_action_"))) {
+            const parts = i.isStringSelectMenu()
+                ? ["app", i.values[0], i.customId.replace("app_action_", "")]
+                : i.customId.split("_");
             const member = await i.guild.members.fetch(i.user.id);
 
             if (parts[0] === "group" && parts[1] === "start") return;
@@ -5765,6 +5731,11 @@ const PERSONAL_REPORT_TOPIC_PREFIX = "darkness-personal-report:";
 const PORTFOLIO_TOPIC_PREFIX = "portfolio_";
 const PERSONAL_REPORT_FORUM_ID = "1543149973044990062"; // legacy forum, migration source only
 const PORTFOLIO_ADMIN_TOPIC_PREFIX = "darkness-portfolio-admin:";
+const PORTFOLIO_THREAD_DEFS = [
+    { name: "CAPT & MCL", description: "результаты, материалы и откаты CAPT и MCL." },
+    { name: "РП контент", description: "РП отчёты, ГГ, разгон, грин и другие игровые активности." },
+    { name: "Уведомления", description: "заявки, решения, покупки, коины и выговоры." }
+];
 const PORTFOLIO_CATEGORY_NAME = "Портфели";
 const PORTFOLIO_ARCHIVE_CATEGORY_NAME = "Архив портфелей";
 const DISCORD_CATEGORY_CHANNEL_LIMIT = 50;
@@ -6015,7 +5986,7 @@ async function ensurePrivatePortfolioChannel(member, { createIfMissing = true } 
     }
 
     if (created || isArchived) {
-        await ensurePortfolioAdminThread(member, channel);
+        await ensurePortfolioThreads(member, channel);
     }
 
     return { channel, created };
@@ -6026,14 +5997,64 @@ async function ensurePersonalReportChannel(member) {
     return result.channel;
 }
 
+function formatPortfolioAfkTime(userId) {
+    const activeAfk = salary.afk?.[userId];
+    const minutes = activeAfk?.since
+        ? Math.max(0, Math.floor((Date.now() - activeAfk.since) / 60000))
+        : 0;
+    const hours = Math.floor(minutes / 60);
+    const rest = minutes % 60;
+    return `${hours} ч ${rest} мин`;
+}
+
+function getPortfolioStats(member) {
+    const userId = member.id;
+    const mpHistory = salary.mpHistory?.[userId] || [];
+    const portfolioHistory = salary.portfolioHistory?.[userId] || [];
+    const checkerId = salary.recruits?.[userId] || null;
+    const otkatCount = portfolioHistory.filter(entry =>
+        String(entry.reason || "").toLowerCase().includes("откат")
+    ).length;
+
+    return {
+        checker: checkerId ? `<@${checkerId}>` : "Не назначен",
+        events: mpHistory.length,
+        afk: formatPortfolioAfkTime(userId),
+        otkats: otkatCount,
+        promotions: salary.reports?.[userId] || 0,
+        warnings: 0,
+        balance: fmtPoints(salary.mpPoints?.[userId] || 0)
+    };
+}
+
 function buildPortfolioInfoPayload(member) {
+    const stats = getPortfolioStats(member);
     const container = new ContainerBuilder()
         .setAccentColor(0x2B2D31)
-        .addTextDisplayComponents(new TextDisplayBuilder().setContent("## 📁 Личный канал отчётов"))
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(
+            `**Checker:** ${stats.checker}\n` +
+            `**Владелец:** <@${member.id}>`
+        ))
         .addSeparatorComponents(new SeparatorBuilder())
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(
-            `**Участник:** <@${member.id}>\n\n` +
-            `Сюда ты должен кидать скрины, откаты с каптов, РП-шек, арены и проявлять актив.`
+            "📊 **Статистика:**\n" +
+            `> Мероприятий сыграно: ${stats.events}\n` +
+            `> Время в АФК: ${stats.afk} (за все заходы)\n` +
+            `> Откатов отправлено: ${stats.otkats}\n` +
+            `> Удачных повышений: ${stats.promotions}\n` +
+            `> Выговоров: ${stats.warnings}/3\n` +
+            `> Баланс: ${stats.balance} 🪙`
+        ))
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(
+            "📚 **Разделы портфолио:**\n" +
+            "> 🗡️ **CAPT & MCL** — результаты, материалы и откаты CAPT и MCL.\n" +
+            "> 📝 **РП контент** — РП отчёты, ГГ, разгон, грин и другие игровые активности.\n" +
+            "> 📢 **Уведомления** — заявки, решения, покупки, коины и выговоры."
+        ))
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(
+            "В основном канале портфолио можно писать свободно."
         ));
 
     return {
@@ -6052,10 +6073,13 @@ async function ensurePortfolioInfoPanel(member, channel) {
         message.author?.id === client.user.id && (
             componentsContainText(message.components, "Сюда ты должен кидать") ||
             componentsContainText(message.components, "Сюда необходимо отправлять") ||
+            componentsContainText(message.components, "Checker:") ||
+            componentsContainText(message.components, "Личный канал отчётов") ||
             message.embeds?.some(embed => String(embed.title || "").includes("Личный канал отчётов"))
         )
     );
     const currentMessage = infoMessages.find(message =>
+        componentsContainText(message.components, "Checker:") ||
         componentsContainText(message.components, "Сюда ты должен кидать") ||
         componentsContainText(message.components, "Сюда необходимо отправлять")
     );
@@ -6140,7 +6164,7 @@ async function migrateForumPortfoliosToChannels(guild) {
             if (!member) continue;
             channel = await createPrivatePortfolioChannel(member);
             if (!channel) continue;
-            await ensurePortfolioAdminThread(member, channel);
+            await ensurePortfolioThreads(member, channel);
 
             if (thread.archived) {
                 const archiveCategory = await getAvailablePortfolioCategory(guild, "archive", 1);
@@ -6328,109 +6352,117 @@ function hasPortfolioAdminAccess(interaction) {
     );
 }
 
-function buildPortfolioAdminThreadContainer(userId, displayName) {
-    const rewardRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-            .setCustomId(`portfolio_thread_reward_rp_${userId}`)
-            .setLabel(`Выдать +${PORTFOLIO_REWARD_RP_POINTS} за РП отчёт`)
-            .setEmoji("📋")
-            .setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder()
-            .setCustomId(`portfolio_thread_reward_capt_${userId}`)
-            .setLabel(`Выдать +${PORTFOLIO_REWARD_CAPT_POINTS} за капт`)
-            .setEmoji("⚔️")
-            .setStyle(ButtonStyle.Secondary)
+function hasPortfolioAdminAccess(interaction) {
+    return Boolean(
+        interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
+        interaction.member?.roles?.cache?.has(PERSONAL_REPORT_VIEW_ROLE_ID) ||
+        interaction.member?.roles?.cache?.has(PERSONAL_REPORT_HIGH_RANK_ROLE_ID)
     );
-    const tierRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-            .setCustomId(`portfolio_thread_tier_up_${userId}`)
-            .setLabel("Повысить тир")
-            .setEmoji("⬆️")
-            .setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder()
-            .setCustomId(`portfolio_thread_tier_down_${userId}`)
-            .setLabel("Понизить тир")
-            .setEmoji("⬇️")
-            .setStyle(ButtonStyle.Secondary)
-    );
-
-    return new ContainerBuilder()
-        .setAccentColor(0x2B2D31)
-        .addTextDisplayComponents(new TextDisplayBuilder().setContent(`## Админ-панель\n-# Портфель: ${displayName}`))
-        .addSeparatorComponents(new SeparatorBuilder())
-        .addTextDisplayComponents(new TextDisplayBuilder().setContent(
-            `📋 РП отчёт — **+${PORTFOLIO_REWARD_RP_POINTS} балла**\n` +
-            `⚔️ Капт — **+${PORTFOLIO_REWARD_CAPT_POINTS} баллов**\n` +
-            `⬆️ / ⬇️ — изменить тир участника`
-        ))
-        .addSeparatorComponents(new SeparatorBuilder())
-        .addActionRowComponents(rewardRow)
-        .addActionRowComponents(tierRow);
 }
 
-async function findPortfolioAdminThread(portfolioChannel) {
-    if (!portfolioChannel?.threads) return null;
+function normalizePortfolioThreadName(name) {
+    return String(name || "")
+        .toLowerCase()
+        .replace(/[\s_—–-]+/g, "");
+}
+
+function isPortfolioAdminThread(thread) {
+    return normalizePortfolioThreadName(thread?.name).startsWith("админпанел");
+}
+
+async function fetchPortfolioThreads(portfolioChannel) {
+    if (!portfolioChannel?.threads) return [];
     const active = await portfolioChannel.threads.fetchActive().catch(() => null);
-    const archived = await portfolioChannel.threads.fetchArchived({ type: "private", limit: 100 }).catch(() => null);
+    const archivedPublic = await portfolioChannel.threads.fetchArchived({ type: "public", limit: 100 }).catch(() => null);
+    const archivedPrivate = await portfolioChannel.threads.fetchArchived({ type: "private", limit: 100 }).catch(() => null);
     const threads = [
         ...Array.from(active?.threads?.values?.() || []),
-        ...Array.from(archived?.threads?.values?.() || [])
+        ...Array.from(archivedPublic?.threads?.values?.() || []),
+        ...Array.from(archivedPrivate?.threads?.values?.() || [])
     ];
-    return [...new Map(threads.map(thread => [thread.id, thread])).values()]
-        .find(thread => thread.name === "Админ-панель") || null;
+    return [...new Map(threads.map(thread => [thread.id, thread])).values()];
 }
 
-// Участники админ-веток портфелей: хайки и чекеры.
-// Администраторов сохраняем в ветках независимо от этих ролей, чтобы не лишать их доступа.
-function shouldBePortfolioAdminThreadMember(member) {
-    return Boolean(
-        member &&
-        !member.user?.bot &&
-        (
-            member.permissions?.has(PermissionFlagsBits.Administrator) ||
-            member.roles?.cache?.has(PERSONAL_REPORT_VIEW_ROLE_ID) ||
-            member.roles?.cache?.has(PERSONAL_REPORT_HIGH_RANK_ROLE_ID)
-        )
-    );
-}
-
-async function syncPortfolioAdminThreadMember(thread, member) {
-    if (!thread || !member || member.user?.bot) return;
-
-    if (shouldBePortfolioAdminThreadMember(member)) {
-        if (thread.archived) await thread.setArchived(false).catch(() => null);
-        await thread.members.add(member.id).catch(() => null);
-    } else {
-        await thread.members.remove(member.id).catch(() => null);
-    }
-}
-
-async function syncPortfolioAdminMemberInAllThreads(member) {
-    const guild = member?.guild;
+async function removePortfolioAdminThreads(guild) {
     if (!guild || guild.id !== "1458190222042075251") return;
-
     await guild.channels.fetch().catch(() => null);
+
     const portfolioChannels = guild.channels.cache.filter(channel =>
         channel.type === ChannelType.GuildText && extractPortfolioUserId(channel.topic)
     );
 
     for (const portfolioChannel of portfolioChannels.values()) {
-        let thread = await findPortfolioAdminThread(portfolioChannel);
-
-        // Если ветка была удалена/ещё не создалась — восстанавливаем её вместе с панелью.
-        if (!thread) {
-            const ownerId = extractPortfolioUserId(portfolioChannel.topic);
-            const owner = ownerId ? await guild.members.fetch(ownerId).catch(() => null) : null;
-            if (owner) thread = await ensurePortfolioAdminThread(owner, portfolioChannel);
+        const threads = await fetchPortfolioThreads(portfolioChannel);
+        for (const thread of threads) {
+            if (!isPortfolioAdminThread(thread)) continue;
+            if (thread.archived) await thread.setArchived(false).catch(() => null);
+            await thread.delete("Удаление админ-панели портфеля").catch(error => {
+                console.error(`[PORTFOLIO ADMIN THREAD DELETE ERROR] ${thread.id}`, error);
+            });
         }
-
-        if (thread) await syncPortfolioAdminThreadMember(thread, member);
     }
 }
 
-async function syncAllPortfolioAdminThreads(guild) {
-    if (!guild || guild.id !== "1458190222042075251") return;
+async function ensurePortfolioThreads(member, portfolioChannel) {
+    if (!member?.guild || !portfolioChannel) return [];
 
+    const threads = await fetchPortfolioThreads(portfolioChannel);
+    for (const thread of threads) {
+        if (isPortfolioAdminThread(thread)) {
+            if (thread.archived) await thread.setArchived(false).catch(() => null);
+            await thread.delete("Удаление админ-панели портфеля").catch(() => null);
+        }
+    }
+
+    const availableThreads = (await fetchPortfolioThreads(portfolioChannel))
+        .filter(thread => !isPortfolioAdminThread(thread));
+
+    const oldOtherThreads = availableThreads.filter(thread => thread.name === "Иные мероприятия");
+    const existingRpThread = availableThreads.find(thread => thread.name === "РП контент");
+    if (existingRpThread) {
+        for (const oldThread of oldOtherThreads) {
+            await oldThread.delete("Замена раздела на РП контент").catch(() => null);
+        }
+    } else if (oldOtherThreads.length > 1) {
+        for (const duplicate of oldOtherThreads.slice(1)) {
+            await duplicate.delete("Удаление дубликата раздела портфеля").catch(() => null);
+        }
+    }
+
+    const result = [];
+
+    for (const definition of PORTFOLIO_THREAD_DEFS) {
+        let thread = availableThreads.find(item => item.name === definition.name);
+
+        // Переименовываем старую ветку «Иные мероприятия» в «РП контент».
+        if (!thread && definition.name === "РП контент") {
+            thread = availableThreads.find(item => item.name === "Иные мероприятия");
+            if (thread) await thread.setName(definition.name).catch(() => null);
+        }
+
+        if (!thread) {
+            thread = await portfolioChannel.threads.create({
+                name: definition.name,
+                type: ChannelType.PublicThread,
+                autoArchiveDuration: 10080,
+                reason: `Создание раздела портфеля: ${definition.name}`
+            }).catch(error => {
+                console.error(`[PORTFOLIO THREAD CREATE ERROR] ${definition.name}`, error);
+                return null;
+            });
+        }
+
+        if (thread) {
+            if (thread.archived) await thread.setArchived(false).catch(() => null);
+            result.push(thread);
+        }
+    }
+
+    return result;
+}
+
+async function ensureAllPortfolioThreads(guild) {
+    if (!guild || guild.id !== "1458190222042075251") return;
     await guild.members.fetch().catch(() => null);
     await guild.channels.fetch().catch(() => null);
 
@@ -6443,72 +6475,14 @@ async function syncAllPortfolioAdminThreads(guild) {
         const owner = ownerId ? await guild.members.fetch(ownerId).catch(() => null) : null;
         if (!owner) continue;
 
-        const thread = await ensurePortfolioAdminThread(owner, portfolioChannel);
-        if (!thread) continue;
-
-        const threadMembers = await thread.members.fetch().catch(() => null);
-        if (!threadMembers) continue;
-
-        for (const threadMember of threadMembers.values()) {
-            const guildMember = guild.members.cache.get(threadMember.id) ||
-                await guild.members.fetch(threadMember.id).catch(() => null);
-            await syncPortfolioAdminThreadMember(thread, guildMember);
-        }
+        await ensurePortfolioInfoPanel(owner, portfolioChannel);
+        await ensurePortfolioThreads(owner, portfolioChannel);
     }
 }
 
-async function ensurePortfolioAdminThread(member, portfolioChannel) {
-    if (!member?.guild || !portfolioChannel) return null;
-    const guild = member.guild;
-    let thread = await findPortfolioAdminThread(portfolioChannel);
-
-    if (!thread) {
-        thread = await portfolioChannel.threads.create({
-            name: "Админ-панель",
-            type: ChannelType.PrivateThread,
-            autoArchiveDuration: 10080,
-            reason: `Админ-панель портфеля ${member.user.username}`
-        }).catch(error => {
-            console.error("[PORTFOLIO ADMIN THREAD CREATE ERROR]", error);
-            return null;
-        });
-    }
-    if (!thread) return null;
-    if (thread.archived) await thread.setArchived(false).catch(() => null);
-
-    const admins = guild.members.cache.filter(currentMember =>
-        shouldBePortfolioAdminThreadMember(currentMember)
-    );
-    for (const admin of admins.values()) {
-        await syncPortfolioAdminThreadMember(thread, admin);
-    }
-
-    // Чистим старых участников: если хайка/чекера больше нет, доступ к ветке убирается.
-    const threadMembers = await thread.members.fetch().catch(() => null);
-    if (threadMembers) {
-        for (const threadMember of threadMembers.values()) {
-            const guildMember = guild.members.cache.get(threadMember.id) ||
-                await guild.members.fetch(threadMember.id).catch(() => null);
-            await syncPortfolioAdminThreadMember(thread, guildMember);
-        }
-    }
-
-    const messages = await thread.messages.fetch({ limit: 50 }).catch(() => null);
-    const panelMessage = messages?.find(message =>
-        message.author?.id === client.user.id &&
-        componentsContainText(message.components, "Админ-панель")
-    );
-    const panelPayload = {
-        components: [buildPortfolioAdminThreadContainer(member.id, portfolioBaseChannelName(member))],
-        flags: MessageFlags.IsComponentsV2,
-        allowedMentions: { parse: [] }
-    };
-    if (panelMessage) {
-        await panelMessage.edit(panelPayload).catch(() => null);
-    } else {
-        await thread.send(panelPayload).catch(() => null);
-    }
-    return thread;
+// Совместимость со старыми вызовами: админ-панели больше не создаются.
+async function ensurePortfolioAdminThread() {
+    return null;
 }
 
 async function sendRpReportToPersonalChannel(guild, userId, rpData, evidenceUrl) {
@@ -6564,16 +6538,6 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
         }
         if (removedRoles.has(PERSONAL_REPORT_ROLE_ID)) {
             await notifyPersonalReportRoleLost(newMember.guild, newMember.id, "role");
-        }
-
-        // Автоматически добавляем/удаляем хайков и чекеров во всех админ-ветках портфелей.
-        const portfolioStaffRoleChanged =
-            addedRoles.has(PERSONAL_REPORT_VIEW_ROLE_ID) ||
-            addedRoles.has(PERSONAL_REPORT_HIGH_RANK_ROLE_ID) ||
-            removedRoles.has(PERSONAL_REPORT_VIEW_ROLE_ID) ||
-            removedRoles.has(PERSONAL_REPORT_HIGH_RANK_ROLE_ID);
-        if (portfolioStaffRoleChanged) {
-            await syncPortfolioAdminMemberInAllThreads(newMember);
         }
 
         if (addedRoles.size || removedRoles.size) {
