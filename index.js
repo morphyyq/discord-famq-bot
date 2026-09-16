@@ -968,8 +968,18 @@ function reconcileChannelMembers(channel) {
 }
 
 function getTemporaryVoiceOwner(channel) {
-    const match = String(channel?.topic || "").match(/^darkness-temp-voice:(\d+)$/);
-    return match?.[1] || null;
+    if (!channel) return null;
+
+    const mappedOwner = [...tempVoiceRooms.entries()].find(([, channelId]) => channelId === channel.id)?.[0];
+    if (mappedOwner) return mappedOwner;
+
+    // После перезапуска определяем владельца по overwrite ManageChannels.
+    const ownerOverwrite = channel.permissionOverwrites?.cache?.find(overwrite =>
+        overwrite.id !== channel.guild?.id &&
+        overwrite.id !== client.user?.id &&
+        overwrite.allow?.has(PermissionFlagsBits.ManageChannels)
+    );
+    return ownerOverwrite?.id || null;
 }
 
 function getTemporaryVoiceRoomForMember(member) {
@@ -1068,10 +1078,9 @@ async function createTemporaryVoiceRoom(member) {
     }
 
     const channel = await guild.channels.create({
-        name: `🔊 ${member.displayName}`.slice(0, 100),
+        name: `🔊・${member.displayName}`.slice(0, 100),
         type: ChannelType.GuildVoice,
         parent: trigger.parentId || undefined,
-        topic: `${TEMP_VOICE_TOPIC_PREFIX}${member.id}`,
         permissionOverwrites: [
             { id: guild.id, allow: ["ViewChannel", "Connect", "Speak"] },
             { id: member.id, allow: ["ViewChannel", "Connect", "Speak", "ManageChannels"] },
@@ -1092,7 +1101,9 @@ async function createTemporaryVoiceRoom(member) {
 async function transferTemporaryVoiceOwner(channel, newOwnerId) {
     const oldOwnerId = getTemporaryVoiceOwner(channel);
     if (!oldOwnerId || !newOwnerId) return false;
-    await channel.setTopic(`${TEMP_VOICE_TOPIC_PREFIX}${newOwnerId}`).catch(() => null);
+    if (oldOwnerId !== newOwnerId) {
+        await channel.permissionOverwrites.delete(oldOwnerId).catch(() => null);
+    }
     tempVoiceRooms.delete(oldOwnerId);
     tempVoiceRooms.set(newOwnerId, channel.id);
     await channel.permissionOverwrites.edit(newOwnerId, {
@@ -1114,10 +1125,9 @@ async function initTemporaryVoiceRooms(guild) {
     const channels = await guild.channels.fetch().catch(() => null);
     if (!channels) return;
     for (const channel of channels.values()) {
+        if (channel.type !== ChannelType.GuildVoice || !channel.name.startsWith("🔊・")) continue;
         const ownerId = getTemporaryVoiceOwner(channel);
-        if (ownerId && channel.type === ChannelType.GuildVoice) {
-            tempVoiceRooms.set(ownerId, channel.id);
-        }
+        if (ownerId) tempVoiceRooms.set(ownerId, channel.id);
     }
 }
 
