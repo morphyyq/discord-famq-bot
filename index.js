@@ -1023,20 +1023,35 @@ function buildVoiceControlPanel() {
 }
 
 async function ensureVoiceControlPanel(guild) {
-    const channel = await guild.channels.fetch(VOICE_CONTROL_PANEL_CHANNEL_ID).catch(() => null);
-    if (!channel?.isTextBased?.()) return;
+    const channel = await guild.channels.fetch(VOICE_CONTROL_PANEL_CHANNEL_ID).catch(error => {
+        console.error("[VOICE PANEL FETCH ERROR]", error);
+        return null;
+    });
+    if (!channel?.isTextBased?.()) {
+        console.error(`[VOICE PANEL ERROR] Канал ${VOICE_CONTROL_PANEL_CHANNEL_ID} не найден или не является текстовым.`);
+        return;
+    }
 
-    const messages = await channel.messages.fetch({ limit: 50 }).catch(() => null);
-    const panel = messages?.find(message =>
-        message.author?.id === client.user.id &&
-        componentsContainText(message.components, "Возможные манипуляции в вашей комнате")
-    );
+    const messages = await channel.messages.fetch({ limit: 50 }).catch(error => {
+        console.error("[VOICE PANEL MESSAGE FETCH ERROR]", error);
+        return null;
+    });
+    const panels = messages
+        ? messages.filter(message =>
+            message.author?.id === client.user.id &&
+            componentsContainText(message.components, "Возможные манипуляции в вашей комнате")
+        )
+        : [];
+    const panel = panels.values ? panels.values().next().value : null;
     const payload = buildVoiceControlPanel();
 
     if (panel) {
-        await panel.edit(payload).catch(() => null);
+        await panel.edit(payload).catch(error => console.error("[VOICE PANEL EDIT ERROR]", error));
+        for (const duplicate of panels.values()) {
+            if (duplicate.id !== panel.id) await duplicate.delete().catch(() => null);
+        }
     } else {
-        await channel.send(payload).catch(error => console.error("[VOICE PANEL ERROR]", error));
+        await channel.send(payload).catch(error => console.error("[VOICE PANEL SEND ERROR]", error));
     }
 }
 
@@ -1404,6 +1419,7 @@ client.once(Events.ClientReady, async () => {
         await initVoiceSessions(mainGuild);
     }
     setInterval(updateOnlineMonitor, 60000);
+    setInterval(() => ensureVoiceControlPanel(mainGuild), 60000);
     setInterval(tickVoicePoints, VOICE_TICK_MS);
 
     // =====================================================
@@ -6627,12 +6643,14 @@ async function ensurePortfolioInfoPanel(member, channel) {
             componentsContainText(message.components, "Сюда ты должен кидать") ||
             componentsContainText(message.components, "Сюда необходимо отправлять") ||
             componentsContainText(message.components, "Checker:") ||
+            componentsContainText(message.components, "Владелец:") ||
             componentsContainText(message.components, "Личный канал отчётов") ||
             message.embeds?.some(embed => String(embed.title || "").includes("Личный канал отчётов"))
         )
     );
     const currentMessage = infoMessages.find(message =>
         componentsContainText(message.components, "Checker:") ||
+        componentsContainText(message.components, "Владелец:") ||
         componentsContainText(message.components, "Сюда ты должен кидать") ||
         componentsContainText(message.components, "Сюда необходимо отправлять")
     );
