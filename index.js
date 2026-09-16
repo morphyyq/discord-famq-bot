@@ -59,11 +59,14 @@ const client = new Client({
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMembers,
         GatewayIntentBits.GuildPresences,
-        GatewayIntentBits.GuildVoiceStates
+        GatewayIntentBits.GuildVoiceStates,
+        GatewayIntentBits.GuildMessageReactions
     ],
     partials: [
         Partials.Channel,
-        Partials.Message
+        Partials.Message,
+        Partials.Reaction,
+        Partials.User
     ]
 });
 
@@ -189,7 +192,7 @@ function fmtPoints(value) {
 // DATABASE (MONGODB)
 // =====================================================
 let db;
-let salary = { balances: {}, recruits: {}, reports: {}, afk: {}, archive: {}, auditMessages: {}, mpPoints: {}, mpHistory: {}, portfolioHistory: {}, logThreads: {} };
+let salary = { balances: {}, recruits: {}, reports: {}, afk: {}, archive: {}, auditMessages: {}, mpPoints: {}, mpHistory: {}, portfolioHistory: {}, portfolioCheckers: {}, logThreads: {} };
 
 async function connectDB() {
     const client = new MongoClient(process.env.MONGO_URI);
@@ -209,6 +212,7 @@ async function connectDB() {
         else if (doc._id === "mpPoints") salary.mpPoints = doc.data || {};
         else if (doc._id === "mpHistory") salary.mpHistory = doc.data || {};
         else if (doc._id === "portfolioHistory") salary.portfolioHistory = doc.data || {};
+        else if (doc._id === "portfolioCheckers") salary.portfolioCheckers = doc.data || {};
         else if (doc._id === "logThreads") salary.logThreads = doc.data || {};
     }
     console.log(`[DB] Данные загружены из MongoDB`);
@@ -226,6 +230,7 @@ async function saveDB(data) {
         db.collection("salary").updateOne({ _id: "mpPoints" }, { $set: { data: data.mpPoints } }, { upsert: true }),
         db.collection("salary").updateOne({ _id: "mpHistory" }, { $set: { data: data.mpHistory } }, { upsert: true }),
         db.collection("salary").updateOne({ _id: "portfolioHistory" }, { $set: { data: data.portfolioHistory } }, { upsert: true }),
+        db.collection("salary").updateOne({ _id: "portfolioCheckers" }, { $set: { data: data.portfolioCheckers } }, { upsert: true }),
         db.collection("salary").updateOne({ _id: "logThreads" }, { $set: { data: data.logThreads } }, { upsert: true }),
     ]);
 }
@@ -1835,6 +1840,73 @@ client.on(Events.ChannelDelete, async (channel) => {
 });
 
 // =====================================================
+// PORTFOLIO REACTION REWARDS — начисление коинов по ✅
+// =====================================================
+client.on(Events.MessageReactionAdd, async (reaction, user) => {
+    try {
+        if (user.bot) return;
+        if (reaction.partial) await reaction.fetch().catch(() => null);
+        if (reaction.message?.partial) await reaction.message.fetch().catch(() => null);
+
+        const message = reaction.message;
+        const guild = message?.guild;
+        if (!guild || guild.id !== "1458190222042075251") return;
+        if (reaction.emoji.name !== "✅") return;
+
+        const thread = message.channel;
+        if (!thread?.isThread?.()) return;
+        if (thread.name !== "РП контент" && thread.name !== "CAPT & MCL") return;
+
+        const portfolioChannel = thread.parent ||
+            (thread.parentId ? await guild.channels.fetch(thread.parentId).catch(() => null) : null);
+        const ownerId = extractPortfolioUserId(portfolioChannel?.topic);
+        if (!portfolioChannel || !ownerId) return;
+        if (!message.author || message.author.bot || message.author.id !== ownerId) return;
+
+        const reviewer = await guild.members.fetch(user.id).catch(() => null);
+        const serverConfig = SERVERS[guild.id];
+        const canReward = Boolean(
+            reviewer?.permissions?.has(PermissionFlagsBits.Administrator) ||
+            serverConfig?.ALLOWED_ROLES?.some(roleId => reviewer?.roles?.cache?.has(roleId))
+        );
+
+        // Реакции обычных участников не учитываются и сразу убираются.
+        if (!canReward) {
+            await reaction.users.remove(user.id).catch(() => null);
+            return;
+        }
+
+        const isCapt = thread.name === "CAPT & MCL";
+        const points = isCapt ? PORTFOLIO_REWARD_CAPT_POINTS : PORTFOLIO_REWARD_RP_POINTS;
+        const reason = isCapt ? "Капт" : "РП контент";
+        salary.portfolioHistory[ownerId] ||= [];
+
+        const alreadyRewarded = salary.portfolioHistory[ownerId].some(entry =>
+            entry.messageId === message.id && entry.reason === reason
+        );
+        if (alreadyRewarded) return;
+
+        salary.mpPoints[ownerId] = (salary.mpPoints[ownerId] || 0) + points;
+        salary.portfolioHistory[ownerId].push({
+            points,
+            reason,
+            by: user.id,
+            messageId: message.id,
+            ts: Math.floor(Date.now() / 1000)
+        });
+        await saveDB(salary);
+
+        const owner = await guild.members.fetch(ownerId).catch(() => null);
+        if (owner) await ensurePortfolioInfoPanel(owner, portfolioChannel).catch(() => null);
+        await sendPortfolioRewardNotification(guild, portfolioChannel, ownerId, points, reason, user.id);
+
+        console.log(`[PORTFOLIO REWARD] ${user.tag} выдал ${points} коинов пользователю ${ownerId} за ${reason}`);
+    } catch (error) {
+        console.error("[PORTFOLIO REACTION REWARD ERROR]", error);
+    }
+});
+
+// =====================================================
 // PLUS SYSTEM — сбор плюсов на капт
 // =====================================================
 const plusEvents = new Map();
@@ -1843,15 +1915,44 @@ function plusTotalSlots(event) {
     return event.participants.size + event.extraParticipants.size;
 }
 
+function getPlusTier(userId, guild) {
+    const member = guild?.members.cache.get(userId);
+    if (member?.roles.cache.has(PORTFOLIO_TIER_A_ROLE_ID)) {
+        return { order: 1, emoji: "🥇", label: "1 тир" };
+    }
+    if (member?.roles.cache.has(PORTFOLIO_TIER_B_ROLE_ID)) {
+        return { order: 2, emoji: "🥈", label: "2 тир" };
+    }
+    if (member?.roles.cache.has(PORTFOLIO_TIER_C_ROLE_ID)) {
+        return { order: 3, emoji: "🥉", label: "3 тир" };
+    }
+    return { order: 4, emoji: "❓", label: "Без тира" };
+}
+
+function formatPlusParticipants(entries, event) {
+    const guild = client.guilds.cache.get(event.guildId);
+    return [...entries]
+        .sort((a, b) => {
+            const tierA = getPlusTier(a.userId, guild);
+            const tierB = getPlusTier(b.userId, guild);
+            return tierA.order - tierB.order;
+        })
+        .map((participant, index) => {
+            const tier = getPlusTier(participant.userId, guild);
+            return `[${index + 1}] ${tier.emoji} <@${participant.userId}>`;
+        })
+        .join("\n");
+}
+
 function buildPlusContainer(event) {
     const occupied = plusTotalSlots(event);
     const participantEntries = [...event.participants.values()];
     const extraEntries = [...event.extraParticipants.values()];
     const participantsText = participantEntries.length
-        ? participantEntries.map((participant, index) => `${index + 1}. <@${participant.userId}>`).join("\n")
+        ? formatPlusParticipants(participantEntries, event)
         : "*Пока никто не присоединился.*";
     const extraSlotsText = extraEntries.length
-        ? extraEntries.map((participant, index) => `${index + 1}. <@${participant.userId}>`).join("\n")
+        ? formatPlusParticipants(extraEntries, event)
         : "*Дополнительных слотов нет.*";
 
     const container = new ContainerBuilder()
@@ -1867,6 +1968,7 @@ function buildPlusContainer(event) {
         .addSeparatorComponents(new SeparatorBuilder())
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(`### 👥 Участники\n${participantsText}`))
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(`### ➕ Дополнительные слоты\n${extraSlotsText}`))
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent("**Тиры:** 🥇 1 тир · 🥈 2 тир · 🥉 3 тир · ❓ без тира"))
         .addSeparatorComponents(new SeparatorBuilder())
         .addActionRowComponents(new ActionRowBuilder().addComponents(
             new ButtonBuilder()
@@ -3844,6 +3946,77 @@ Main состав — основа нашей семьи. Здесь играю�
             return;
         }
 
+        // =====================================================
+        // ЧЕКЕР ПОРТФЕЛЯ — выбор, отказ и снятие чекера
+        // =====================================================
+        if (
+            (i.isStringSelectMenu() && i.customId.startsWith("portfolio_checker_select_")) ||
+            (i.isButton() && i.customId.startsWith("portfolio_checker_remove_"))
+        ) {
+            const isRemoveButton = i.isButton();
+            const prefix = isRemoveButton ? "portfolio_checker_remove_" : "portfolio_checker_select_";
+            const ownerId = i.customId.replace(prefix, "");
+            const action = isRemoveButton ? "remove" : i.values[0];
+            const currentChannel = i.channel?.isThread?.() ? i.channel.parent : i.channel;
+            const currentOwnerId = extractPortfolioUserId(currentChannel?.topic);
+
+            if (currentOwnerId !== ownerId) {
+                await i.reply({ content: "❌ Управлять чекером можно только из нужного портфеля.", flags: MessageFlags.Ephemeral });
+                return;
+            }
+
+            const canManageChecker = Boolean(
+                i.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
+                SERVERS[i.guild.id]?.ALLOWED_ROLES?.some(roleId => i.member?.roles?.cache?.has(roleId))
+            );
+            if (!canManageChecker) {
+                await i.reply({ content: "❌ Только администратор может управлять чекером портфеля.", flags: MessageFlags.Ephemeral });
+                return;
+            }
+
+            salary.portfolioCheckers ||= {};
+            const currentCheckerId = salary.portfolioCheckers[ownerId] || null;
+
+            if (action === "become") {
+                if (currentCheckerId && currentCheckerId !== i.user.id) {
+                    await i.reply({ content: `❌ У этого портфеля уже есть чекер: <@${currentCheckerId}>.`, flags: MessageFlags.Ephemeral });
+                    return;
+                }
+                salary.portfolioCheckers[ownerId] = i.user.id;
+                await saveDB(salary);
+                const owner = await i.guild.members.fetch(ownerId).catch(() => null);
+                if (owner) await ensurePortfolioInfoPanel(owner, currentChannel).catch(() => null);
+                await i.reply({ content: "✅ Вы назначены чекером этого портфеля.", flags: MessageFlags.Ephemeral });
+                return;
+            }
+
+            if (action === "decline") {
+                if (currentCheckerId !== i.user.id) {
+                    await i.reply({ content: "ℹ️ Вы не назначены чекером этого портфеля.", flags: MessageFlags.Ephemeral });
+                    return;
+                }
+                salary.portfolioCheckers[ownerId] = null;
+                await saveDB(salary);
+                const owner = await i.guild.members.fetch(ownerId).catch(() => null);
+                if (owner) await ensurePortfolioInfoPanel(owner, currentChannel).catch(() => null);
+                await i.reply({ content: "✅ Вы отказались от роли чекера этого портфеля.", flags: MessageFlags.Ephemeral });
+                return;
+            }
+
+            if (action === "remove") {
+                if (!currentCheckerId) {
+                    await i.reply({ content: "ℹ️ В этом портфеле сейчас нет чекера.", flags: MessageFlags.Ephemeral });
+                    return;
+                }
+                salary.portfolioCheckers[ownerId] = null;
+                await saveDB(salary);
+                const owner = await i.guild.members.fetch(ownerId).catch(() => null);
+                if (owner) await ensurePortfolioInfoPanel(owner, currentChannel).catch(() => null);
+                await i.reply({ content: `✅ Чекер <@${currentCheckerId}> убран из портфеля.`, flags: MessageFlags.Ephemeral });
+                return;
+            }
+        }
+
         // Админ-панели портфелей удалены: управление теперь ведётся через разделы портфеля.
         if (i.commandName === "portfolio_panel") {
             await i.reply({ content: "ℹ️ Админ-панели портфелей удалены. Используйте ветки CAPT & MCL, РП контент и Уведомления.", flags: MessageFlags.Ephemeral });
@@ -3998,6 +4171,18 @@ Main состав — основа нашей семьи. Здесь играю�
             };
         }
 
+        async function findPortfolioNotificationsThread(portfolioChannel) {
+            if (!portfolioChannel?.threads) return null;
+            const active = await portfolioChannel.threads.fetchActive().catch(() => null);
+            const archived = await portfolioChannel.threads.fetchArchived({ type: "public", limit: 100 }).catch(() => null);
+            const threads = [
+                ...Array.from(active?.threads?.values?.() || []),
+                ...Array.from(archived?.threads?.values?.() || [])
+            ];
+            return [...new Map(threads.map(thread => [thread.id, thread])).values()]
+                .find(thread => thread.name === "Уведомления") || null;
+        }
+
         async function sendShopPurchaseStatusToPortfolio(guild, userId, { product, approved, reviewerId, details }) {
             let portfolioChannel = await findPersonalReportChannel(guild, userId, false);
             if (!portfolioChannel) {
@@ -4005,8 +4190,20 @@ Main состав — основа нашей семьи. Здесь играю�
             }
             if (!portfolioChannel) return;
 
+            let notificationsThread = await findPortfolioNotificationsThread(portfolioChannel);
+            if (!notificationsThread) {
+                const owner = await guild.members.fetch(userId).catch(() => null);
+                if (owner) await ensurePortfolioThreads(owner, portfolioChannel);
+                notificationsThread = await findPortfolioNotificationsThread(portfolioChannel);
+            }
+            if (!notificationsThread) return;
+
+            if (notificationsThread.archived) {
+                await notificationsThread.setArchived(false).catch(() => null);
+            }
+
             const status = approved ? "одобрена" : "отменена";
-            await portfolioChannel.send(shopPurchasePayload({
+            await notificationsThread.send(shopPurchasePayload({
                 title: approved ? "✅ Покупка одобрена" : "❌ Покупка отменена",
                 color: approved ? 0x2ECC71 : 0xE74C3C,
                 lines: [
@@ -6011,7 +6208,10 @@ function getPortfolioStats(member) {
     const userId = member.id;
     const mpHistory = salary.mpHistory?.[userId] || [];
     const portfolioHistory = salary.portfolioHistory?.[userId] || [];
-    const checkerId = salary.recruits?.[userId] || null;
+    const hasPortfolioCheckerRecord = Object.prototype.hasOwnProperty.call(salary.portfolioCheckers || {}, userId);
+    const checkerId = hasPortfolioCheckerRecord
+        ? salary.portfolioCheckers[userId]
+        : salary.recruits?.[userId] || null;
     const otkatCount = portfolioHistory.filter(entry =>
         String(entry.reason || "").toLowerCase().includes("откат")
     ).length;
@@ -6055,6 +6255,35 @@ function buildPortfolioInfoPayload(member) {
         .addSeparatorComponents(new SeparatorBuilder())
         .addTextDisplayComponents(new TextDisplayBuilder().setContent(
             "В основном канале портфолио можно писать свободно."
+        ))
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addActionRowComponents(new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+                .setCustomId(`portfolio_checker_select_${member.id}`)
+                .setPlaceholder("Управление чекером портфеля")
+                .setMinValues(1)
+                .setMaxValues(1)
+                .addOptions(
+                    {
+                        label: "Стать чекером",
+                        value: "become",
+                        description: "Назначить себя чекером этого портфеля",
+                        emoji: { name: "✅" }
+                    },
+                    {
+                        label: "Отказаться",
+                        value: "decline",
+                        description: "Отказаться от роли чекера этого портфеля",
+                        emoji: { name: "🚫" }
+                    }
+                )
+        ))
+        .addActionRowComponents(new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`portfolio_checker_remove_${member.id}`)
+                .setLabel("Убрать чекера")
+                .setStyle(ButtonStyle.Danger)
+                .setEmoji("🗑️")
         ));
 
     return {
@@ -6478,6 +6707,41 @@ async function ensureAllPortfolioThreads(guild) {
         await ensurePortfolioInfoPanel(owner, portfolioChannel);
         await ensurePortfolioThreads(owner, portfolioChannel);
     }
+}
+
+async function findPortfolioSectionThread(portfolioChannel, threadName) {
+    const threads = await fetchPortfolioThreads(portfolioChannel);
+    return threads.find(thread => thread.name === threadName) || null;
+}
+
+async function sendPortfolioRewardNotification(guild, portfolioChannel, ownerId, points, reason, reviewerId) {
+    let notificationsThread = await findPortfolioSectionThread(portfolioChannel, "Уведомления");
+    if (!notificationsThread) {
+        const owner = await guild.members.fetch(ownerId).catch(() => null);
+        if (owner) await ensurePortfolioThreads(owner, portfolioChannel);
+        notificationsThread = await findPortfolioSectionThread(portfolioChannel, "Уведомления");
+    }
+    if (!notificationsThread) return;
+
+    if (notificationsThread.archived) {
+        await notificationsThread.setArchived(false).catch(() => null);
+    }
+
+    const container = new ContainerBuilder()
+        .setAccentColor(0x2ECC71)
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent("## ✅ Вам начислены коины"))
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(
+            `<@${ownerId}>, вы получили **+${points} коинов** за **${reason}**.\n` +
+            `**Проверил:** <@${reviewerId}>\n` +
+            `**Баланс:** ${fmtPoints(salary.mpPoints[ownerId] || 0)} коинов`
+        ));
+
+    await notificationsThread.send({
+        components: [container],
+        flags: MessageFlags.IsComponentsV2,
+        allowedMentions: { parse: [] }
+    }).catch(error => console.error("[PORTFOLIO REWARD NOTIFY ERROR]", error));
 }
 
 // Совместимость со старыми вызовами: админ-панели больше не создаются.
